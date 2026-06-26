@@ -1,0 +1,48 @@
+{
+  "Catalog": [
+    {
+      "ItemId": "battle_bucks_100",
+      "ItemClass": "battle_bucks",
+      "CatalogVersion": "1",
+      "DisplayName": "100 Battle Bucks",
+      "Description": "100 Battle Bucks",
+      "VirtualCurrencyPrices": {"RM": 1.99},
+      "RealCurrencyPrices": {1: 199},
+      "Tags": ["currency", "battle_bucks"],
+      "IsBundle": false
+    },
+    {
+      "ItemId": "gems_50",
+      "ItemClass": "gems",
+      "CatalogVersion": "1",
+      "DisplayName": "50 Gems",
+      "Description": "50 Gems",
+      "VirtualCurrencyPrices": {"RM": 0.99},
+      "RealCurrencyPrices": {1: 99},
+      "Tags": ["currency", "gems"],
+      "IsBundle": false
+    },
+    {
+      "ItemId": "chest_battle",
+      "ItemClass": "chest",
+      "CatalogVersion": "1",
+      "DisplayName": "Battle Chest",
+      "Description": "A standard battle chest",
+      "VirtualCurrencyPrices": {"RM": 2.99},
+      "RealCurrencyPrices": {},
+      "Tags": ["chest", "battle_chest"],
+      "IsBundle": false
+    },
+    {
+      "ItemId": "chest_lucky",
+      "ItemClass": "chest",
+      "CatalogVersion": "1",
+      "DisplayName": "Lucky Chest",
+      "Description": "A lucky chest with better rewards",
+      "VirtualCurrencyPrices": {"RM": 4.99},
+      "RealCurrencyPrices": {},
+      "Tags": ["chest", "lucky_chest"],
+      "IsBundle": false
+    }
+  ]
+}

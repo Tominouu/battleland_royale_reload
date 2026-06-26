@@ -1,0 +1,1 @@
+# PlayFab-compatible API handlers
