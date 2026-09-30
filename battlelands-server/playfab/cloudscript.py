@@ -17,7 +17,15 @@ def _initialize_data_s5(params):
     # MatchBoxTokenDataJson must be a JSON object string, VirtualCurrency must be non-null.
     # Catalogs["SeasonItems_14"] is read unchecked by PlayFabRunner.CrosscheckAndResolvePlayerData
     return {
-        "Catalogs": {"SeasonItems_14": []},
+        # SkinRunner.ParseCatalog builds skinDatabase from these; EnsureEquippedSkinsOwned needs the six defaults
+        "Catalogs": {"SeasonItems_14": [
+            {"ItemId": "MrOfficeGuy", "ItemClass": "Character.Default", "VirtualCurrencyPrices": {}},
+            {"ItemId": "ParachuteDefault", "ItemClass": "Parachute.Default", "VirtualCurrencyPrices": {}},
+            {"ItemId": "AnimDefault", "ItemClass": "Animation.Default", "VirtualCurrencyPrices": {}},
+            {"ItemId": "FlagDefault", "ItemClass": "BattleFlag.Default", "VirtualCurrencyPrices": {}},
+            {"ItemId": "FootstepDefault", "ItemClass": "Footstep.Default", "VirtualCurrencyPrices": {}},
+            {"ItemId": "MeleeDefault", "ItemClass": "Melee.Default", "VirtualCurrencyPrices": {}},
+        ]},
         "MatchBoxTokenDataJson": "{}",
         "VirtualCurrency": {},
         "NowTicks": _now_ticks(),

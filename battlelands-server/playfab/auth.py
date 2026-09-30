@@ -42,6 +42,37 @@ def _info_payload(params, playfab_id):
         }
     if params.get("GetPlayerProfile"):
         payload["PlayerProfile"] = {"PlayerId": playfab_id}
+    if params.get("GetTitleData"):
+        # GameLoader.IsTooOld reads this key unchecked: Version(Application.version) < Version(value)
+        # Economies.LoadConfigs reads the other keys unchecked (suffix 14 = season, 4 = game mode events)
+        payload["TitleData"] = {
+            "MinimumVersionAndroid": "2.9.6",
+            # SkinState needs at least one entry per LevelReq list (SkinHelper.GetBattlePointsRequirementForLevel)
+            "BattlePointsConfig": "{\"LevelReqCommon\":[0],\"LevelReqRare\":[0],\"LevelReqLegendary\":[0],"
+                                  "\"LevelUpPriceCommon\":[0],\"LevelUpPriceRare\":[0],\"LevelUpPriceLegendary\":[0]}",
+            "XtraLvlPurchase_14": "0",
+            "GemsPerDogTag": "0",
+            "DefaultDogTagsCapacity": "0",
+            "CardPackPriceMultiplier": "1",
+            "MatchBoxConfig": "{}",
+            # TrophyRoadRunner..ctor: Max() over TrophiesRequired needs >= 1 element; a single high threshold keeps
+            # UITrophyRoad progress/Prev(t) safe for a new player (Type left None: no icon, no exception)
+            "TrophyRoadConfig_14": "[{\"RewardId\":\"TrophyRoad_1\",\"TrophiesRequired\":1000000}]",
+            "ChallengeRewards_14": "{\"Daily\":[],\"Weekly\":[]}",
+            "BattlePassRewards_14": "{}",
+            "ChallengeConfig_14": "[]",
+            # GameModeEventLobbyRunner.FindCurrentEvent loops forever on an empty list; needs DurationMinutes > 0
+            # and TeamSize 1/2/4 (UIGameModeEvents); EventStart is recomputed by the client, so it is omitted
+            "GameModeEventsConfig_4": "{\"RotationStartUTCMs\":0,\"GameModeEvents\":"
+                                      "[{\"Id\":\"HeavyweightSolo\",\"DurationMinutes\":1440,\"TeamSize\":1}]}",
+            "DailyFreeItemConfig": "{\"RewardsPool\":[]}",
+            "DailyFreeConsumableConfig": "{\"RewardsPool\":[]}",
+            "ExtendedAnalyticsConfig": "{\"EnableExtendedAnalytics\":false,\"Regions\":[],\"GameModes\":[]}",
+            # MatchReportRunner..ctor reads this unchecked; "{}" is enough for loading (lists used only after a match)
+            "MatchReportConfig_14": "{}",
+            # SkinShopRunner..ctor reads this unchecked (JSONObject array of skin ItemIds); empty = no exclusions
+            "ExcludedSkinItems_14": "[]",
+        }
     if params.get("GetUserReadOnlyData"):
         # SetupPlayerDataFromLogin reads this key unchecked; SetupSeasonStats needs a JSON object string
         payload["UserReadOnlyData"] = {"SeasonStatsHistory": {"Value": "{}"}}
