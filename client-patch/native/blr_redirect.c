@@ -299,6 +299,38 @@ static void install_photon_redirect(void)
                                              connect_region_master_hook, "NetworkingPeer.ConnectToRegionMaster");
 }
 
+/* ---- Region override ----
+ * LobbyRunner.TryConnect only takes the ConnectToPhoton branch (-> ConnectToRegion hook) when
+ * PhotonHandler.BestRegionCodeInPreferences is a region listed in GameSettings.AvailableRegions;
+ * otherwise it goes to the Photon Cloud NameServer (ApplicationArchived). The getter
+ * (2.9.6 RVA 0x12623EC) is called with a direct BL, so its code is patched to return eu.
+ * Its 4th instruction is an ADRP, hence no trampoline: the original is never needed. */
+
+static const uint32_t best_region_prologue[4] = { 0xf81e0ff3, 0xa9017bfd, 0x910043fd, 0xd0011313 };
+
+static void install_region_override(void)
+{
+    void *k_handler = find_class("", "PhotonHandler");
+    MethodInfo *m = k_handler ? il2cpp_class_get_method_from_name(k_handler, "get_BestRegionCodeInPreferences", 0) : 0;
+    uint32_t *t = m ? m->methodPointer : 0;
+    if (!t) { LOGE("PhotonHandler.get_BestRegionCodeInPreferences introuvable"); return; }
+    for (int i = 0; i < 4; i++)
+        if (t[i] != best_region_prologue[i]) {
+            LOGE("get_BestRegionCodeInPreferences : prologue inattendu (%08x), pas de patch", t[i]);
+            return;
+        }
+
+    uint32_t code[2] = { 0x52800000 | (CLOUD_REGION_EU << 5), 0xd65f03c0 };   /* mov w0, #eu ; ret */
+    uintptr_t page = (uintptr_t)sysconf(SC_PAGESIZE);
+    uintptr_t start = (uintptr_t)t & ~(page - 1);
+    size_t len = (((uintptr_t)t + 8 + page - 1) & ~(page - 1)) - start;
+    if (mprotect((void *)start, len, PROT_RWX)) { LOGE("mprotect refuse pour get_BestRegionCodeInPreferences"); return; }
+    memcpy(t, code, 8);
+    flush_code(t, t + 2);
+    mprotect((void *)start, len, PROT_RX);
+    LOGI("[BLR] PhotonHandler.get_BestRegionCodeInPreferences hook installed at %p (returns eu)", (void *)t);
+}
+
 /* ---- Boot (equivalent of Reborn natif.c, without AudioManager/UI) ---- */
 
 static void *wait_il2cpp(void *arg)
@@ -316,6 +348,7 @@ static void *wait_il2cpp(void *arg)
     LOGI("[BLR] IL2CPP ready");
 
     install_photon_redirect();
+    install_region_override();
     return 0;
 }
 

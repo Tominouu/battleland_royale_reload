@@ -58,15 +58,17 @@ def _info_payload(params, playfab_id):
             # TrophyRoadRunner..ctor: Max() over TrophiesRequired needs >= 1 element; a single high threshold keeps
             # UITrophyRoad progress/Prev(t) safe for a new player (Type left None: no icon, no exception)
             "TrophyRoadConfig_14": "[{\"RewardId\":\"TrophyRoad_1\",\"TrophiesRequired\":1000000}]",
-            "ChallengeRewards_14": "{\"Daily\":[],\"Weekly\":[]}",
+            "ChallengeRewards_14": "{\"Daily\":[{\"ChallengeIdSuffix\":\"_1\",\"TypeString\":\"AddToGems\",\"Amount\":10}],\"DailyFallback\":{\"ChallengeIdSuffix\":\"_1\",\"TypeString\":\"AddToGems\",\"Amount\":10},\"Weekly\":[]}",
             "BattlePassRewards_14": "{}",
             "ChallengeConfig_14": "[]",
             # GameModeEventLobbyRunner.FindCurrentEvent loops forever on an empty list; needs DurationMinutes > 0
             # and TeamSize 1/2/4 (UIGameModeEvents); EventStart is recomputed by the client, so it is omitted
             "GameModeEventsConfig_4": "{\"RotationStartUTCMs\":0,\"GameModeEvents\":"
                                       "[{\"Id\":\"HeavyweightSolo\",\"DurationMinutes\":1440,\"TeamSize\":1}]}",
-            "DailyFreeItemConfig": "{\"RewardsPool\":[]}",
-            "DailyFreeConsumableConfig": "{\"RewardsPool\":[]}",
+            # Bootstrap values (not historical): SkinShopRunner.GetNewShopContent calls GetRandom on each pool,
+            # and SkinShopData.AnyIdNull treats Type None as an invalid shop. TypeString goes through Enum.Parse.
+            "DailyFreeItemConfig": "{\"RewardsPool\":[{\"TypeString\":\"AddToGems\",\"Amount\":10}]}",
+            "DailyFreeConsumableConfig": "{\"RewardsPool\":[{\"TypeString\":\"Consumable\",\"Amount\":1}]}",
             "ExtendedAnalyticsConfig": "{\"EnableExtendedAnalytics\":false,\"Regions\":[],\"GameModes\":[]}",
             # MatchReportRunner..ctor reads this unchecked; "{}" is enough for loading (lists used only after a match)
             "MatchReportConfig_14": "{}",

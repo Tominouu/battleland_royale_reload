@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Redirect the PlayFab SDK of Battlelands 2.9.6 by patching global-metadata.dat string literals.
 
-Same three literals Reborn changes, found by content (not index):
+Same literals Reborn changes, found by content (not index):
 
   "playfabapi.com"                           -> "https://<host>"
       PlayFabSettings uses a base URL starting with "http" verbatim instead of
@@ -9,6 +9,9 @@ Same three literals Reborn changes, found by content (not index):
   ".playfabapi.com/Client/LinkCustomID"      -> "@<host>/Client/LinkCustomID"
   ".playfabapi.com/Client/LoginWithFacebook" -> "@<host>/Client/LoginWithFacebook"
       Hardcoded as "https://" + TitleId + literal; "@" turns the TitleId into URL userinfo.
+  "2fd21053-1cdf-4067-887c-b83edd1a1af4"     -> "774b10b9-5bfb-48a7-9971-55300fc0d4bd"
+      Photon AppId (literal #6273): LobbyRunner.PostInit -> PhotonServerSettings.AppID -> SetApp,
+      and PlayFabRunner.AuthenticateWithPhoton -> PhotonApplicationId. Reborn's AppId.
 
 Unlike Reborn (which overwrote three unrelated literals to make room), the new strings are
 appended at the end of the file and only the literal table entries are repointed: IL2CPP v24
@@ -22,6 +25,9 @@ HEADER = struct.Struct('<IiIiIi')   # sanity, version, literalOffset, literalSiz
 LITERAL = struct.Struct('<II')      # length, dataIndex
 
 
+REBORN_PHOTON_APP_ID = b'774b10b9-5bfb-48a7-9971-55300fc0d4bd'
+
+
 def patch(data: bytearray, host: str) -> list[str]:
     sanity, version, lit_off, lit_size, data_off, _ = HEADER.unpack_from(data, 0)
     if sanity != 0xFAB11BAF or version != 24:
@@ -31,6 +37,7 @@ def patch(data: bytearray, host: str) -> list[str]:
         b'playfabapi.com': f'https://{host}'.encode(),
         b'.playfabapi.com/Client/LinkCustomID': f'@{host}/Client/LinkCustomID'.encode(),
         b'.playfabapi.com/Client/LoginWithFacebook': f'@{host}/Client/LoginWithFacebook'.encode(),
+        b'2fd21053-1cdf-4067-887c-b83edd1a1af4': REBORN_PHOTON_APP_ID,
     }
     found = {}
     for i in range(lit_size // LITERAL.size):

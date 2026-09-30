@@ -25,6 +25,17 @@ def _initialize_data_s5(params):
             {"ItemId": "FlagDefault", "ItemClass": "BattleFlag.Default", "VirtualCurrencyPrices": {}},
             {"ItemId": "FootstepDefault", "ItemClass": "Footstep.Default", "VirtualCurrencyPrices": {}},
             {"ItemId": "MeleeDefault", "ItemClass": "Melee.Default", "VirtualCurrencyPrices": {}},
+            # SkinShopRunner.GetNewShopContent needs 5 distinct picks; the Character branch accepts any
+            # non-excluded character, so 5 characters in total let the selection loop terminate
+            {"ItemId": "MrBaldWifeBeater", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+            {"ItemId": "MrBananaMan", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+            {"ItemId": "MrBunny", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+            {"ItemId": "MrGhostPirate", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+            # SkinGachaRunner.SetupChestCatalogItems finds these by ItemId; Get*ChestPrice reads
+            # VirtualCurrencyPrices["GE"] unchecked. Bootstrap prices (not historical values).
+            {"ItemId": "ChestBattle", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 100}},
+            {"ItemId": "ChestBattlePremium", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 250}},
+            {"ItemId": "ChestLucky", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 50}},
         ]},
         "MatchBoxTokenDataJson": "{}",
         "VirtualCurrency": {},
