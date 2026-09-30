@@ -17,7 +17,10 @@ from playfab.data import (
     get_user_read_only_data,
     get_user_inventory,
     get_catalog_items,
+    get_store_items,
+    get_title_news,
 )
+from playfab.cloudscript import execute_cloud_script
 
 playfab_bp = Blueprint("playfab", __name__)
 
@@ -58,6 +61,9 @@ _ROUTES = {
     "/Client/GetUserReadOnlyData": get_user_read_only_data,
     "/Client/GetUserInventory": get_user_inventory,
     "/Client/GetCatalogItems": get_catalog_items,
+    "/Client/GetStoreItems": get_store_items,
+    "/Client/GetTitleNews": get_title_news,
+    "/Client/ExecuteCloudScript": execute_cloud_script,
 }
 
 @playfab_bp.route("/", defaults={"path": ""}, methods=["POST"])

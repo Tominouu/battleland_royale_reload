@@ -55,3 +55,44 @@ def get_catalog_items(request_json, session_ticket):
         "status": "OK",
         "data": catalog
     })
+
+# (CatalogVersion, StoreId) requested by PlayFabRunner.GetStores; only GetStoreItemsResult.Store is read
+_KNOWN_STORES = {
+    ("Battlebucks", "com.futureplay.battleground.virtualcurrencies2"),
+    ("Battlebucks", "com.futureplay.battleground.bpstore"),
+    ("Battlebucks", "com.futureplay.battleground.bundles"),
+    ("SeasonItems_14", "DynamicBundleItems"),
+    ("SeasonItems_14", "BattlePointsPacks"),
+    ("SeasonItems_14", "EventRewards"),
+}
+
+def get_store_items(request_json, session_ticket):
+    playfab_id = _sessions.get(session_ticket)
+    if not playfab_id:
+        return jsonify(error("Not authorized", 401))
+
+    store = ((request_json or {}).get("CatalogVersion"), (request_json or {}).get("StoreId"))
+    if store not in _KNOWN_STORES:
+        return jsonify(error(f"Unknown store: {store[0]}/{store[1]}", 404))
+
+    return jsonify({
+        "code": 200,
+        "status": "OK",
+        "data": {
+            "Store": [],
+        }
+    })
+
+def get_title_news(request_json, session_ticket):
+    playfab_id = _sessions.get(session_ticket)
+    if not playfab_id:
+        return jsonify(error("Not authorized", 401))
+
+    # PlayFabRunner.GetTitleNewsMessages: News must be non-null; empty list skips item parsing
+    return jsonify({
+        "code": 200,
+        "status": "OK",
+        "data": {
+            "News": [],
+        }
+    })
