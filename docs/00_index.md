@@ -28,3 +28,7 @@
 | [09_configuration.md](09_configuration.md) | Configuration et clés |
 | [10_classes.md](10_classes.md) | Classes importantes |
 | [11_diagram.md](11_diagram.md) | Diagramme d'architecture |
+| [12_REBORN_ANALYSIS.md](12_REBORN_ANALYSIS.md) | Analyse de l'APK Battlelands Reborn |
+| [13_MINIMAL_REDIRECT.md](13_MINIMAL_REDIRECT.md) | Redirection minimale PlayFab + Photon (natif + métadonnées) |
+| [14_REBORN_IL2CPP_PATCHES.md](14_REBORN_IL2CPP_PATCHES.md) | Les 13 patchs Reborn de libil2cpp.so + cause du blocage à 1 % |
+| [15_PLAYFAB_LOGIN.md](15_PLAYFAB_LOGIN.md) | Premier login PlayFab depuis Waydroid (URL, TLS/overlay, LoginWithAndroidDeviceID, appels suivants) |

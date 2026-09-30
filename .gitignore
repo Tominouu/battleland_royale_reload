@@ -23,3 +23,7 @@ Thumbs.db
 
 # Extracted game files
 /tmp/opencode/
+
+# Local build outputs (patched APKs, test signing key, logs)
+build/
+client-patch/native/out/

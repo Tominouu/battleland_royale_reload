@@ -8,51 +8,84 @@ _sessions = {}
 _players = {}
 
 def _make_playfab_id():
-    return str(uuid.uuid4())
+    # Real PlayFab IDs are 16 hex chars; the client converts them (TeamHelper.PlayFabIdToUInt64)
+    return uuid.uuid4().hex[:16].upper()
 
-def _make_session_ticket():
-    return str(uuid.uuid4()).replace("-", "").upper()
+def _make_session_ticket(playfab_id):
+    return f"{playfab_id}-{uuid.uuid4().hex[:16].upper()}-{uuid.uuid4().hex.upper()}"
 
-def login_with_custom_id(request_json):
-    custom_id = (request_json or {}).get("CustomId", "")
-    title_id = (request_json or {}).get("TitleId", "")
+# InfoRequestParameters flag -> GetPlayerCombinedInfoResultPayload field (empty value for now)
+_INFO_PAYLOAD_FIELDS = {
+    "GetUserAccountInfo": ("AccountInfo", None),
+    "GetUserInventory": ("UserInventory", []),
+    "GetUserVirtualCurrency": ("UserVirtualCurrency", {}),
+    "GetUserData": ("UserData", {}),
+    "GetUserReadOnlyData": ("UserReadOnlyData", {}),
+    "GetCharacterInventories": ("CharacterInventories", []),
+    "GetCharacterList": ("CharacterList", []),
+    "GetTitleData": ("TitleData", {}),
+    "GetPlayerStatistics": ("PlayerStatistics", []),
+    "GetPlayerProfile": ("PlayerProfile", None),
+}
 
-    player = _players.get(custom_id)
-    if not player:
-        pf_id = _make_playfab_id()
-        created = True
-    else:
-        pf_id = player["PlayFabId"]
-        created = False
-
-    session_ticket = _make_session_ticket()
-    entity_token = str(uuid.uuid4()).replace("-", "")
-
-    _players[custom_id] = {
-        "PlayFabId": pf_id,
-        "CustomId": custom_id,
-        "TitleId": title_id,
-        "Created": created,
-    }
-    _sessions[session_ticket] = pf_id
-
-    return jsonify({
-        "code": 200,
-        "status": "OK",
-        "data": {
-            "SessionTicket": session_ticket,
-            "PlayFabId": pf_id,
-            "NewlyCreated": created,
-            "EntityToken": {
-                "EntityToken": entity_token,
-                "TokenExpiration": "2099-01-01T00:00:00Z",
-            },
-            "SettingsForUser": {
-                "NeedsAttribution": False,
-                "GatherDeviceInfo": True,
-            },
+def _info_payload(params, playfab_id):
+    payload = {"UserDataVersion": 0, "UserReadOnlyDataVersion": 0}
+    for flag, (field, empty) in _INFO_PAYLOAD_FIELDS.items():
+        if params.get(flag):
+            payload[field] = empty
+    if params.get("GetUserAccountInfo"):
+        payload["AccountInfo"] = {
+            "PlayFabId": playfab_id,
+            "Created": "2026-01-01T00:00:00Z",
+            # SetupPlayerDataFromLogin dereferences TitleInfo unchecked; DisplayName -> BattleTag ("" if empty)
+            "TitleInfo": {"DisplayName": None},
         }
-    })
+    if params.get("GetPlayerProfile"):
+        payload["PlayerProfile"] = {"PlayerId": playfab_id}
+    if params.get("GetUserReadOnlyData"):
+        # SetupPlayerDataFromLogin reads this key unchecked; SetupSeasonStats needs a JSON object string
+        payload["UserReadOnlyData"] = {"SeasonStatsHistory": {"Value": "{}"}}
+    if params.get("GetPlayerStatistics"):
+        # PlayFabRunner.CheckAndUpdateSeason: Season == 14 skips ExecuteCloudScript("startSeason14")
+        payload["PlayerStatistics"] = [{"StatisticName": "Season", "Value": 14}]
+    return payload
+
+def _login(account_key, request_json):
+    """Shared LoginWith* handler: LoginResult as defined by the client's PlayFab SDK 2.66."""
+    request_json = request_json or {}
+    player = _players.get(account_key)
+    created = player is None
+    if created:
+        player = {"PlayFabId": _make_playfab_id(), "TitleId": request_json.get("TitleId", "")}
+        _players[account_key] = player
+    pf_id = player["PlayFabId"]
+
+    session_ticket = _make_session_ticket(pf_id)
+    _sessions[session_ticket] = pf_id
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    data = {
+        "PlayFabId": pf_id,
+        "SessionTicket": session_ticket,
+        "NewlyCreated": created,
+        "LastLoginTime": now,
+        "EntityToken": {
+            "EntityToken": uuid.uuid4().hex + uuid.uuid4().hex,
+            "TokenExpiration": "2099-01-01T00:00:00Z",
+            "Entity": {"Id": pf_id, "Type": "title_player_account"},
+        },
+        "SettingsForUser": {"NeedsAttribution": False, "GatherDeviceInfo": True, "GatherFocusInfo": True},
+    }
+    params = request_json.get("InfoRequestParameters")
+    if params:
+        data["InfoResultPayload"] = _info_payload(params, pf_id)
+    return jsonify({"code": 200, "status": "OK", "data": data})
+
+def login_with_custom_id(request_json, session_ticket=None):
+    return _login("custom:" + (request_json or {}).get("CustomId", ""), request_json)
+
+def login_with_android_device_id(request_json, session_ticket=None):
+    return _login("android:" + (request_json or {}).get("AndroidDeviceId", ""), request_json)
 
 def link_custom_id(request_json, session_ticket):
     playfab_id = _sessions.get(session_ticket)
@@ -81,9 +114,8 @@ def get_photon_authentication_token(request_json, session_ticket):
         "code": 200,
         "status": "OK",
         "data": {
-            "PhotonAuthenticationToken": {
-                "Token": token,
-            }
+            # GetPhotonAuthenticationTokenResult has a single string field
+            "PhotonCustomAuthenticationToken": token,
         }
     })
 
