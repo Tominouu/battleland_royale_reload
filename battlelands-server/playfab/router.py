@@ -9,6 +9,7 @@ from playfab.auth import (
     login_with_custom_id,
     login_with_android_device_id,
     link_custom_id,
+    link_android_device_id,
     get_photon_authentication_token,
     error,
 )
@@ -52,6 +53,7 @@ _ROUTES = {
     "/Client/LoginWithCustomID": login_with_custom_id,
     "/Client/LoginWithAndroidDeviceID": login_with_android_device_id,
     "/Client/LinkCustomID": link_custom_id,
+    "/Client/LinkAndroidDeviceID": link_android_device_id,
     "/Client/GetPhotonAuthenticationToken": get_photon_authentication_token,
     "/Client/GetUserReadOnlyData": get_user_read_only_data,
     "/Client/GetUserInventory": get_user_inventory,

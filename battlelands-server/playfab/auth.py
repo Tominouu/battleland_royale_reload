@@ -103,6 +103,21 @@ def link_custom_id(request_json, session_ticket):
         "data": {}
     })
 
+def link_android_device_id(request_json, session_ticket):
+    # LinkAndroidDeviceIDResult has no fields; the client maps any success to true (LinkDeviceId b__122_0)
+    playfab_id = _sessions.get(session_ticket)
+    if not playfab_id:
+        return jsonify(error("Not authorized", 401))
+
+    device_id = (request_json or {}).get("AndroidDeviceId", "")
+    _players.setdefault("android:" + device_id, {"PlayFabId": playfab_id})
+
+    return jsonify({
+        "code": 200,
+        "status": "OK",
+        "data": {}
+    })
+
 def get_photon_authentication_token(request_json, session_ticket):
     playfab_id = _sessions.get(session_ticket)
     if not playfab_id:
