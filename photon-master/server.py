@@ -66,6 +66,7 @@ OP_AUTHENTICATE = 230
 OP_CREATE_GAME = 227
 OP_JOIN_RANDOM_GAME = 225
 OP_RAISE_EVENT = 253
+OP_LEAVE = 254
 PARAM_EVENT_CODE = 244
 PARAM_DATA = 245
 # Quantum event codes (QuantumNetworkCommunicator / DeterministicNetwork)
@@ -541,6 +542,8 @@ class PhotonConnection:
             self.handle_game_create_game(plaintext)
         elif self.role == ROLE_GAME and self.authenticated and op_code == OP_RAISE_EVENT:
             self.handle_game_raise_event(params)
+        elif self.role == ROLE_GAME and self.authenticated and op_code == OP_LEAVE:
+            self.handle_game_leave()
 
     def handle_join_random_game(self):
         """No room is ever open for joining: answer 32760 so the client falls back to CreateNewRoom (227)."""
@@ -584,6 +587,12 @@ class PhotonConnection:
         })
         frame = self.send(MSG_EVENT, event)
         self.log(logging.INFO, 'GAME', 'Join event sent actor=%d hex=%s', LOCAL_ACTOR_NR, frame.hex(' '))
+
+    def handle_game_leave(self):
+        """LeaveRoom: answer 254 / ReturnCode 0 without parameters. NetworkingPeer.OnOperationResponse case 254
+        calls DisconnectToReconnect, so the client closes the connection itself; the socket is left open here."""
+        self.send(MSG_OPERATION_RESPONSE, encode_protocol16_operation_response(OP_LEAVE, 0, None, {}))
+        self.log(logging.INFO, 'GAME', 'LeaveRoom -> OK')
 
     def handle_game_raise_event(self, params: dict):
         """Logs Quantum traffic (100 protocol, 101/102 input) and answers the first Quantum Join with one

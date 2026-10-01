@@ -392,6 +392,17 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x05'))
 
+    async def test_game_leave_answered_and_connection_kept(self):
+        # LeaveRoom (254) without parameters: 254 / ReturnCode 0 / no parameters; the client disconnects itself
+        reader, writer = await self.joined_game_server()
+        writer.write(frame(2, bytes.fromhex('fe 0000')) + b'\xf0\x00\x00\x00\x0a')
+        response = await read_frame(reader)
+        pong = await reader.readexactly(9)   # socket still open after the response
+        writer.close()
+        self.assertEqual(response, bytes.fromhex('f3 03 fe 0000 2a 0000'))
+        self.assertEqual(decode_operation_response(response), (254, 0, None, {}))
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x0a'))
+
     async def probed_game_server(self):
         reader, writer = await self.joined_game_server()
         writer.write(frame(2, RAISE_EVENT_QUANTUM_JOIN))
