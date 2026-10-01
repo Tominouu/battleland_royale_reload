@@ -60,6 +60,10 @@ MSG_NAMES = {0: 'Init', 1: 'InitResponse', 2: 'OperationRequest', 3: 'OperationR
 OP_INIT_ENCRYPTION = 0      # internal operation
 OP_AUTHENTICATE = 230
 OP_CREATE_GAME = 227
+OP_JOIN_RANDOM_GAME = 225
+# ErrorCode.NoRandomMatchFound; NetworkingPeer.OnOperationResponse (225) compares with 0x7FF8, then
+# OnPhotonRandomJoinFailed -> LobbyController -> LobbyRunner.CreateNewRoom
+RETURN_CODE_NO_RANDOM_MATCH_FOUND = 32760
 PARAM_ROOM_NAME = 255
 PARAM_ADDRESS = 230
 PARAM_EXPECTED_USERS = 238
@@ -508,10 +512,18 @@ class PhotonConnection:
             return
         self.log(logging.INFO, self.role, 'post-auth operation opcode=%d length=%d encrypted=%s params=%s',
                  op_code, len(plaintext), encrypted, {k: describe_value(k, v) for k, v in params.items()})
-        if self.role == ROLE_MASTER and self.authenticated and op_code == OP_CREATE_GAME:
+        if self.role == ROLE_MASTER and self.authenticated and op_code == OP_JOIN_RANDOM_GAME:
+            self.handle_join_random_game()
+        elif self.role == ROLE_MASTER and self.authenticated and op_code == OP_CREATE_GAME:
             self.handle_create_game(params)
         elif self.role == ROLE_GAME and self.authenticated and op_code == OP_CREATE_GAME:
             self.handle_game_create_game(plaintext)
+
+    def handle_join_random_game(self):
+        """No room is ever open for joining: answer 32760 so the client falls back to CreateNewRoom (227)."""
+        self.send(MSG_OPERATION_RESPONSE, encode_protocol16_operation_response(
+            OP_JOIN_RANDOM_GAME, RETURN_CODE_NO_RANDOM_MATCH_FOUND, None, {}))
+        self.log(logging.INFO, 'MASTER', 'JoinRandomRoom -> NO_MATCH')
 
     def handle_create_game(self, params: dict):
         """Master CreateGame: NetworkingPeer.OnOperationResponse (227, MasterServer) reads 255 RoomName and

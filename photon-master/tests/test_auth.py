@@ -117,6 +117,12 @@ CREATE_GAME_ON_GAME_SERVER = bytes.fromhex(
     '73000d5175616e74756d506c7567696eef6f01bf6900000009'.replace(' ', ''))
 
 
+# JoinRandomRoom as sent by the real client (build/normal-mm-test/logs2/normal-mm.pcap)
+JOIN_RANDOM_ON_MASTER = (bytes.fromhex('e1 0002 f8 68 0003 73 0001 74 73 0003 747331 73 0001 63 6f 00'
+                                       ' 73 0001 67 73 0000 ee 79 0001 73') + struct.pack('>H', len(PLAYFAB_ID))
+                         + PLAYFAB_ID.encode())
+
+
 def decode_event(payload):
     """F3 04 | eventCode | parameters -> (eventCode, params)."""
     assert payload[:2] == b'\xf3\x04', payload[:2]
@@ -299,6 +305,38 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
         pong = await reader.readexactly(9)
         self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x03'))
         writer.close()
+
+    async def test_master_join_random_returns_no_match(self):
+        reader, writer, _ = await connect_and_authenticate(self.port, real_client_params())
+        writer.write(frame(2, JOIN_RANDOM_ON_MASTER))
+        response = await read_frame(reader)
+        writer.close()
+        self.assertEqual(response, bytes.fromhex('f3 03 e1 7ff8 2a 0000'))
+
+    async def test_master_create_game_after_no_match_is_answered(self):
+        # Normal matchmaking: 225 -> 32760 -> client CreateNewRoom sends the same 227 as the tutorial
+        reader, writer, _ = await connect_and_authenticate(self.port, real_client_params())
+        writer.write(frame(2, JOIN_RANDOM_ON_MASTER))
+        await read_frame(reader)
+        writer.write(frame(2, CREATE_GAME_ON_MASTER))
+        op_code, return_code, debug, params = decode_operation_response(await read_frame(reader))
+        writer.close()
+        self.assertEqual((op_code, return_code, debug, sorted(params)), (227, 0, None, [230, 255]))
+        self.assertEqual(params[230], GAME_SERVER_ADDRESS)
+
+    async def test_game_server_normal_create_game_joins_room(self):
+        # Full 227 of a normal room (t=ts1, MaxPlayers 32, IsOpen true) built from the tutorial capture
+        normal = (CREATE_GAME_ON_GAME_SERVER.replace(b'ts0', b'ts1')
+                  .replace(b'\x62\xfd\x6f\x00', b'\x62\xfd\x6f\x01').replace(b'\x62\xff\x62\x01', b'\x62\xff\x62\x20'))
+        reader, writer, _ = await connect_and_authenticate(self.game_port, real_client_params())
+        writer.write(frame(2, normal))
+        params = decode_operation_response(await read_frame(reader))[3]
+        code, event = decode_event(await read_frame(reader))
+        writer.close()
+        _, sent = server.decode_protocol16_operation_request(normal)
+        self.assertEqual((params[254], params[252], params[249], params[248]), (1, [1], {1: sent[249]}, sent[248]))
+        self.assertEqual((params[248]['t'], params[248][253], params[248][255]), ('ts1', True, 32))
+        self.assertEqual((code, event[254], event[249]), (255, 1, sent[249]))
 
     def test_parse_auth_get_parameters(self):
         self.assertEqual(server.parse_auth_get_parameters(f'username={PLAYFAB_ID}&token={TOKEN}'), (PLAYFAB_ID, TOKEN))
