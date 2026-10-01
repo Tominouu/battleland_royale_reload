@@ -2,6 +2,19 @@
 
 Reverse-engineering and local server implementation for Battlelands Royale v2.9.6 (Unity 2018.4.31f1, IL2CPP).
 
+## Screenshots
+
+The original 2.9.6 client running against the private PlayFab backend and Photon Master/GameServer (Waydroid), up to the playable training battle.
+
+| | |
+|:---:|:---:|
+| ![Lobby](docs/screenshots/01-lobby.jpg) | ![Tutorial with Ruby](docs/screenshots/02-tutorial-ruby.jpg) |
+| Lobby after login, BattleTag set | Tutorial, before the first training battle |
+| ![Training battle map](docs/screenshots/03-training-battle-map.jpg) | ![Parachute drop](docs/screenshots/04-parachute.jpg) |
+| Training battle: drop zone selection | Parachute drop |
+| ![In-game tutorial](docs/screenshots/05-tutorial-ingame.jpg) | ![Combat HUD](docs/screenshots/06-combat-hud.jpg) |
+| In-game tutorial | Combat with HUD and practice bots |
+
 ## Structure
 
 ```
