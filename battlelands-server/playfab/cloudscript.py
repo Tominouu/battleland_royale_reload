@@ -82,9 +82,18 @@ def _now_ticks_function(params, playfab_id):
     return _now_ticks()
 
 
+def _save_match_count(params, playfab_id):
+    # PlayFabRunner.HandleIncompleteMatches (login): SaveMatchCount(n) sends SaveMatchCountParams {MatchCount}
+    # for matches started but not saved. The client discards the result (<HandleIncompleteMatches>b__0 returns
+    # the LoginResult), so only a success without Error matters; any error ends LoginSequence in the
+    # "Connection Error" popup. Any MatchCount is accepted; it is not persisted yet.
+    return None
+
+
 _FUNCTIONS = {
     "initializeDataS5": _initialize_data_s5,
     "nowTicks": _now_ticks_function,
+    "saveMatchCount": _save_match_count,
     "saveS5": _save_s5,
 }
 
