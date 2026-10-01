@@ -123,6 +123,21 @@ JOIN_RANDOM_ON_MASTER = (bytes.fromhex('e1 0002 f8 68 0003 73 0001 74 73 0003 74
                          + PLAYFAB_ID.encode())
 
 
+# RaiseEvent 253 carrying the Quantum Join, as sent by the real client (build/normal-room-test/logs/normal-room.pcap):
+# 244 EventCode = (byte)100, 245 = byte[61] BitStream, 252 TargetActors = int[]{0}
+QUANTUM_JOIN = bytes.fromhex(
+    '01480062 66ca666e 6e70cc5a c86272c8 5a68606a 6a5ac26a c2725acc c6c270c2'
+    'c86a6462 64c6641c 00c8b8c0 b8c0b8c0 04000000 00000000 04000000 00'.replace(' ', ''))
+RAISE_EVENT_QUANTUM_JOIN = (bytes.fromhex('fd 0003 f4 62 64 f5 78 0000003d') + QUANTUM_JOIN
+                            + bytes.fromhex('fc 79 0001 69 00000000'))
+QUANTUM_PROBE = bytes.fromhex('02 07 00 00 00 00 00 0c 4c 10')
+
+
+def raise_event(code, data):
+    return bytes.fromhex('fd 0003 f4 62') + bytes([code]) + b'\xf5\x78' + struct.pack('>i', len(data)) + data \
+        + bytes.fromhex('fc 79 0001 69 00000000')
+
+
 def decode_event(payload):
     """F3 04 | eventCode | parameters -> (eventCode, params)."""
     assert payload[:2] == b'\xf3\x04', payload[:2]
@@ -337,6 +352,38 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((params[254], params[252], params[249], params[248]), (1, [1], {1: sent[249]}, sent[248]))
         self.assertEqual((params[248]['t'], params[248][253], params[248][255]), ('ts1', True, 32))
         self.assertEqual((code, event[254], event[249]), (255, 1, sent[249]))
+
+    async def joined_game_server(self):
+        reader, writer, _ = await self.game_server_create_game()
+        await read_frame(reader)   # Join event 255
+        return reader, writer
+
+    async def test_quantum_join_answered_with_config_probe(self):
+        reader, writer = await self.joined_game_server()
+        writer.write(frame(2, RAISE_EVENT_QUANTUM_JOIN))
+        payload = await read_frame(reader)
+        writer.close()
+        self.assertEqual(decode_event(payload), (100, {245: QUANTUM_PROBE}))
+        self.assertEqual(payload, b'\xf3\x04\x64\x00\x01\xf5\x78\x00\x00\x00\x0a' + QUANTUM_PROBE)
+
+    async def test_quantum_probe_sent_once(self):
+        reader, writer = await self.joined_game_server()
+        writer.write(frame(2, RAISE_EVENT_QUANTUM_JOIN))
+        await read_frame(reader)
+        writer.write(frame(2, RAISE_EVENT_QUANTUM_JOIN) + b'\xf0\x00\x00\x00\x04')
+        pong = await reader.readexactly(9)   # second Join: no second probe, only the pong
+        writer.close()
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x04'))
+
+    async def test_quantum_non_join_and_other_codes_not_answered(self):
+        reader, writer = await self.joined_game_server()
+        # client answers (SessionConfig/RuntimeConfig), an input event and a PUN RPC event: nothing sent back
+        writer.write(frame(2, raise_event(100, bytes.fromhex('03 00')))
+                     + frame(2, raise_event(102, b'\x01\x02')) + frame(2, raise_event(200, b'\x00'))
+                     + b'\xf0\x00\x00\x00\x05')
+        pong = await reader.readexactly(9)
+        writer.close()
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x05'))
 
     def test_parse_auth_get_parameters(self):
         self.assertEqual(server.parse_auth_get_parameters(f'username={PLAYFAB_ID}&token={TOKEN}'), (PLAYFAB_ID, TOKEN))

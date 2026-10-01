@@ -5,7 +5,8 @@ Scope: TCP framing, Init, ping, Diffie-Hellman key exchange (internal op 0), enc
 OpAuthenticate (230) checked against battlelands-server (POST /internal/photon/validate), then keep
 the connection alive. The Master answers CreateGame (227) with a room name and the GameServer address;
 the GameServer answers CreateGame by entering the client as actor 1 (OperationResponse 227 + Join event 255)
-and otherwise only logs what the client sends. No room manager, no Quantum.
+and otherwise only logs what the client sends. No room manager. Quantum: only a config probe answers the
+first Quantum Join (see handle_game_raise_event); no SimulationStart, no input (102) handling.
 
 Wire format (capture build/photon-appid/logs/photon-4530.pcap + TPeer.SerializeOperationToMessage):
   framed:  FB | len:u32 BE (whole frame) | channel:u8 | 01 | F3 | msgType:u8 | body
@@ -35,6 +36,8 @@ import urllib.request
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+import quantum
+
 log = logging.getLogger('photon-master')
 
 # --- framing -----------------------------------------------------------------------------------
@@ -61,6 +64,12 @@ OP_INIT_ENCRYPTION = 0      # internal operation
 OP_AUTHENTICATE = 230
 OP_CREATE_GAME = 227
 OP_JOIN_RANDOM_GAME = 225
+OP_RAISE_EVENT = 253
+PARAM_EVENT_CODE = 244
+PARAM_DATA = 245
+# Quantum event codes (QuantumNetworkCommunicator / DeterministicNetwork)
+QUANTUM_EVENT_PROTOCOL = 100
+QUANTUM_EVENT_INPUT = 102
 # ErrorCode.NoRandomMatchFound; NetworkingPeer.OnOperationResponse (225) compares with 0x7FF8, then
 # OnPhotonRandomJoinFailed -> LobbyController -> LobbyRunner.CreateNewRoom
 RETURN_CODE_NO_RANDOM_MATCH_FOUND = 32760
@@ -396,6 +405,7 @@ class PhotonConnection:
         self.peer = writer.get_extra_info('peername')
         self.aes_key: bytes | None = None
         self.authenticated = False
+        self.quantum_probe_sent = False
         self.started = time.monotonic()
 
     def log(self, level: int, tag: str, msg: str, *args):
@@ -518,6 +528,8 @@ class PhotonConnection:
             self.handle_create_game(params)
         elif self.role == ROLE_GAME and self.authenticated and op_code == OP_CREATE_GAME:
             self.handle_game_create_game(plaintext)
+        elif self.role == ROLE_GAME and self.authenticated and op_code == OP_RAISE_EVENT:
+            self.handle_game_raise_event(params)
 
     def handle_join_random_game(self):
         """No room is ever open for joining: answer 32760 so the client falls back to CreateNewRoom (227)."""
@@ -561,6 +573,31 @@ class PhotonConnection:
         })
         frame = self.send(MSG_EVENT, event)
         self.log(logging.INFO, 'GAME', 'Join event sent actor=%d hex=%s', LOCAL_ACTOR_NR, frame.hex(' '))
+
+    def handle_game_raise_event(self, params: dict):
+        """Logs Quantum traffic (100 protocol, 101/102 input) and answers the first Quantum Join with one
+        protocol event: Joined{Confirmed, PlayerSlots=[0]} + SessionConfig{Requested} + RuntimeConfig{Requested},
+        so the client sends back its own configurations. Nothing else is sent (no SimulationStart)."""
+        code, data = params.get(PARAM_EVENT_CODE), params.get(PARAM_DATA)
+        if code not in (QUANTUM_EVENT_PROTOCOL, 101, QUANTUM_EVENT_INPUT) or not isinstance(data, bytes):
+            return
+        self.log(logging.INFO, 'QUANTUM', 'C>S event %d byte[%d] hex=%s', code, len(data), data.hex())
+        if code != QUANTUM_EVENT_PROTOCOL:
+            return
+        messages = quantum.decode_messages(data)
+        for msg in messages:
+            self.log(logging.INFO, 'QUANTUM', 'C>S   %s', quantum.describe_message(msg))
+        if self.quantum_probe_sent or not messages or messages[0].get('type') != quantum.MSG_JOIN:
+            return
+        probe = quantum.config_probe()
+        self.log(logging.INFO, 'QUANTUM', 'S>C probe event %d byte[%d] hex=%s', QUANTUM_EVENT_PROTOCOL,
+                 len(probe), probe.hex())
+        for msg in quantum.decode_messages(probe):
+            self.log(logging.INFO, 'QUANTUM', 'S>C   %s', quantum.describe_message(msg))
+        # NetworkingPeer.OnEvent reads 254 (sender) only if present; the communicator ignores the sender
+        frame = self.send(MSG_EVENT, encode_protocol16_event(QUANTUM_EVENT_PROTOCOL, {PARAM_DATA: probe}))
+        self.quantum_probe_sent = True
+        self.log(logging.INFO, 'QUANTUM', 'S>C probe frame hex=%s', frame.hex(' '))
 
     async def handle_authenticate(self, params: dict, encrypted: bool):
         self.log(logging.INFO, 'AUTH', 'OpAuthenticate encrypted=%s, %d parameters', encrypted, len(params))
