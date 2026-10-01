@@ -88,8 +88,10 @@ def _info_payload(params, playfab_id):
             "DailyFreeItemConfig": "{\"RewardsPool\":[{\"TypeString\":\"AddToGems\",\"Amount\":10}]}",
             "DailyFreeConsumableConfig": "{\"RewardsPool\":[{\"TypeString\":\"Consumable\",\"Amount\":1}]}",
             "ExtendedAnalyticsConfig": "{\"EnableExtendedAnalytics\":false,\"Regions\":[],\"GameModes\":[]}",
-            # MatchReportRunner..ctor reads this unchecked; "{}" is enough for loading (lists used only after a match)
-            "MatchReportConfig_14": "{}",
+            # MatchReportRunner..ctor reads this unchecked. OnMatchEnded (CONTINUE after a match) calls GetRandom on
+            # BattlebucksDistribution then Rewards: both must be non-empty. Bootstrap test values, not historical.
+            "MatchReportConfig_14": "{\"DailyRewardCount\":0,\"BattlebucksDistribution\":[0],"
+                                    "\"Rewards\":[{\"TypeString\":\"AddToGems\",\"Amount\":0,\"Parameter\":\"\"}]}",
             # SkinShopRunner..ctor reads this unchecked (JSONObject array of skin ItemIds); empty = no exclusions
             "ExcludedSkinItems_14": "[]",
         }
