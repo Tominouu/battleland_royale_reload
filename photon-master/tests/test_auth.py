@@ -108,6 +108,25 @@ CREATE_GAME_ON_MASTER = (bytes.fromhex('e3 0001 ee 79 0001 73') + struct.pack('>
                          + PLAYFAB_ID.encode())
 
 
+# CreateGame as sent by the real client to the GameServer (build/gameserver-test/logs/gameserver.pcap, 09:45:11.533)
+CREATE_GAME_ON_GAME_SERVER = bytes.fromhex(
+    'e3000cff730011747574 6f7269616c2d33613634623836 31ee790001730010394141383931424441314630344632 43'
+    'f9680002730002746579000473001039414138393142444131463034463243000000000000 62ff730000'
+    'fa6f01f868000762fd6f0062fe6f0162fa79000373000174000163000167730001747300037473 30'
+    '7300016 36f00730001677300 0062ff6201f16f00e86f01eb6900000bb8ec69000003e8cc790001'
+    '73000d5175616e74756d506c7567696eef6f01bf6900000009'.replace(' ', ''))
+
+
+def decode_event(payload):
+    """F3 04 | eventCode | parameters -> (eventCode, params)."""
+    assert payload[:2] == b'\xf3\x04', payload[:2]
+    r = server.Protocol16Reader(payload[2:])
+    code = r.unpack('B')
+    params = server.decode_protocol16_parameters(r)
+    assert r.pos == len(payload) - 2
+    return code, params
+
+
 def decode_operation_response(payload):
     """F3 03 | opCode | returnCode | debugMessage | parameters -> (opCode, returnCode, debug, params)."""
     assert payload[:2] == b'\xf3\x03', payload[:2]
@@ -218,11 +237,67 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
         response, _ = await authenticate(self.game_port, real_client_params(token='0' * 32))
         self.assertEqual(response, FAILURE)
 
-    async def test_game_server_does_not_answer_create_game(self):
+    async def test_game_server_answers_create_game_with_response_and_join_only(self):
+        # Before the room step the GameServer did not answer 227 at all; it now sends exactly the
+        # OperationResponse 227 and the Join event 255, then nothing but pongs.
         reader, writer, _ = await connect_and_authenticate(self.game_port, real_client_params())
         writer.write(frame(2, CREATE_GAME_ON_MASTER) + b'\xf0\x00\x00\x00\x02')
-        pong = await reader.readexactly(9)   # the next bytes are the pong, not an OperationResponse
-        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x02'))
+        try:
+            self.assertEqual((await read_frame(reader))[:3], b'\xf3\x03\xe3')
+            self.assertEqual((await read_frame(reader))[:3], b'\xf3\x04\xff')
+            pong = await reader.readexactly(9)
+            self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x02'))
+        finally:
+            writer.close()
+
+    async def game_server_create_game(self):
+        reader, writer, _ = await connect_and_authenticate(self.game_port, real_client_params())
+        writer.write(frame(2, CREATE_GAME_ON_GAME_SERVER))
+        return reader, writer, await read_frame(reader)
+
+    def received(self, key):
+        _, params = server.decode_protocol16_operation_request(CREATE_GAME_ON_GAME_SERVER)
+        return params[key]
+
+    async def test_game_create_game_response_success_and_order(self):
+        reader, writer, response = await self.game_server_create_game()
+        writer.close()
+        op_code, return_code, debug, params = decode_operation_response(response)
+        self.assertEqual((op_code, return_code, debug), (227, 0, None))
+        self.assertEqual(list(params), [254, 252, 249, 248])
+
+    async def test_game_create_game_actor_and_actor_list(self):
+        reader, writer, response = await self.game_server_create_game()
+        writer.close()
+        params = decode_operation_response(response)[3]
+        self.assertEqual(params[254], 1)
+        self.assertEqual(params[252], [1])
+        self.assertIn(bytes.fromhex('fe 69 00000001 fc 6e 00000001 00000001'), response)   # int, int[] on the wire
+
+    async def test_game_create_game_echoes_player_and_game_properties(self):
+        reader, writer, response = await self.game_server_create_game()
+        writer.close()
+        params = decode_operation_response(response)[3]
+        self.assertEqual(params[249], {1: self.received(249)})
+        self.assertEqual(params[248], self.received(248))
+        raw = server.decode_protocol16_parameters_raw(CREATE_GAME_ON_GAME_SERVER)[1]
+        self.assertIn(b'\xf9\x68\x00\x01\x69\x00\x00\x00\x01' + raw[249], response)   # {(int)1: props verbatim}
+        self.assertIn(b'\xf8' + raw[248], response)
+
+    async def test_game_join_event_follows_response(self):
+        reader, writer, _ = await self.game_server_create_game()
+        code, params = decode_event(await read_frame(reader))
+        writer.close()
+        self.assertEqual(code, 255)
+        self.assertEqual(list(params), [254, 252, 249])
+        self.assertEqual((params[254], params[252], params[249]), (1, [1], self.received(249)))
+
+    async def test_game_nothing_else_after_join_event(self):
+        reader, writer, _ = await self.game_server_create_game()
+        await read_frame(reader)   # Join event
+        writer.write(b'\xf0\x00\x00\x00\x03')
+        pong = await reader.readexactly(9)
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x03'))
         writer.close()
 
     def test_parse_auth_get_parameters(self):

@@ -4,7 +4,8 @@
 Scope: TCP framing, Init, ping, Diffie-Hellman key exchange (internal op 0), encrypted
 OpAuthenticate (230) checked against battlelands-server (POST /internal/photon/validate), then keep
 the connection alive. The Master answers CreateGame (227) with a room name and the GameServer address;
-the GameServer listener only authenticates and logs what the client sends. No rooms, no Quantum.
+the GameServer answers CreateGame by entering the client as actor 1 (OperationResponse 227 + Join event 255)
+and otherwise only logs what the client sends. No room manager, no Quantum.
 
 Wire format (capture build/photon-appid/logs/photon-4530.pcap + TPeer.SerializeOperationToMessage):
   framed:  FB | len:u32 BE (whole frame) | channel:u8 | 01 | F3 | msgType:u8 | body
@@ -62,6 +63,12 @@ OP_CREATE_GAME = 227
 PARAM_ROOM_NAME = 255
 PARAM_ADDRESS = 230
 PARAM_EXPECTED_USERS = 238
+PARAM_ACTOR_NR = 254
+PARAM_ACTOR_LIST = 252
+PARAM_PLAYER_PROPERTIES = 249
+PARAM_GAME_PROPERTIES = 248
+EVENT_JOIN = 255
+LOCAL_ACTOR_NR = 1
 PARAM_APP_ID = 224
 PARAM_AUTH_TYPE = 217
 PARAM_AUTH_GET_PARAMETERS = 216
@@ -204,7 +211,27 @@ def decode_protocol16_operation_request(body: bytes) -> tuple[int, dict]:
     return op_code, params
 
 
+class Protocol16Raw(bytes):
+    """An already serialized typed Protocol16 value (type code included), emitted verbatim. Used to echo
+    client data without losing Photon types (byte vs int keys, typed string arrays)."""
+
+
+def decode_protocol16_parameters_raw(body: bytes) -> tuple[int, dict]:
+    """OperationRequest body -> (opCode, {key: Protocol16Raw}) keeping each value's exact bytes and the wire order."""
+    r = Protocol16Reader(body)
+    op_code = r.unpack('B')
+    params = {}
+    for _ in range(r.unpack('h')):
+        key = r.unpack('B')
+        start = r.pos
+        decode_protocol16_value(r)
+        params[key] = Protocol16Raw(body[start:r.pos])
+    return op_code, params
+
+
 def encode_protocol16_value(value) -> bytes:
+    if isinstance(value, Protocol16Raw):
+        return bytes(value)
     if value is None:
         return bytes([T_NULL])
     if isinstance(value, bool):
@@ -216,6 +243,11 @@ def encode_protocol16_value(value) -> bytes:
         return struct.pack('>BH', T_STRING, len(data)) + data
     if isinstance(value, int):
         return struct.pack('>Bi', T_INTEGER, value)
+    if isinstance(value, list) and all(isinstance(v, int) and not isinstance(v, bool) for v in value):
+        return struct.pack('>Bi', T_INT_ARRAY, len(value)) + b''.join(struct.pack('>i', v) for v in value)
+    if isinstance(value, dict):   # Hashtable; keys and values typed individually
+        return (struct.pack('>Bh', T_HASHTABLE, len(value))
+                + b''.join(encode_protocol16_value(k) + encode_protocol16_value(v) for k, v in value.items()))
     raise TypeError(f'Protocol16 encoding not implemented for {type(value).__name__}')
 
 
@@ -224,6 +256,11 @@ def encode_protocol16_parameters(params: dict) -> bytes:
     for key, value in params.items():
         out += bytes([key]) + encode_protocol16_value(value)
     return out
+
+
+def encode_protocol16_event(event_code: int, params: dict) -> bytes:
+    """EventData body: eventCode:u8 | parameters."""
+    return bytes([event_code]) + encode_protocol16_parameters(params)
 
 
 def encode_protocol16_operation_response(op_code: int, return_code: int, debug_message: str | None,
@@ -396,11 +433,12 @@ class PhotonConnection:
             self.writer.close()
             self.log(logging.INFO, 'TCP', 'socket closed (authenticated=%s)', self.authenticated)
 
-    def send(self, msg_type: int, body: bytes):
+    def send(self, msg_type: int, body: bytes) -> bytes:
         frame = write_frame(self.writer, msg_type, body)
         self.log(logging.INFO, 'TCP', 'S>C frame type=%#04x (%s) length=%d', msg_type,
                  MSG_NAMES.get(msg_type & 0x7F, '?'), len(frame))
         self.log(logging.DEBUG, 'TCP', 'S>C hex=%s', frame.hex(' '))
+        return frame
 
     async def dispatch(self, msg_type: int, body: bytes):
         encrypted = bool(msg_type & MSG_ENCRYPTED)
@@ -472,6 +510,8 @@ class PhotonConnection:
                  op_code, len(plaintext), encrypted, {k: describe_value(k, v) for k, v in params.items()})
         if self.role == ROLE_MASTER and self.authenticated and op_code == OP_CREATE_GAME:
             self.handle_create_game(params)
+        elif self.role == ROLE_GAME and self.authenticated and op_code == OP_CREATE_GAME:
+            self.handle_game_create_game(plaintext)
 
     def handle_create_game(self, params: dict):
         """Master CreateGame: NetworkingPeer.OnOperationResponse (227, MasterServer) reads 255 RoomName and
@@ -481,6 +521,34 @@ class PhotonConnection:
         self.send(MSG_OPERATION_RESPONSE, encode_protocol16_operation_response(
             OP_CREATE_GAME, 0, None, {PARAM_ROOM_NAME: room_name, PARAM_ADDRESS: self.game_server_address}))
         self.log(logging.INFO, 'MASTER', 'CreateGame response room=%s gameServer=%s', room_name, self.game_server_address)
+
+    def handle_game_create_game(self, plaintext: bytes):
+        """GameServer CreateGame: the client becomes actor 1 of the room it asked for.
+
+        NetworkingPeer.GameEnteredOnGameServer reads 254 ActorNr (required), 252 ActorList, 249 actor properties
+        (Hashtable actorNr -> properties, ReadoutProperties) and 248 game properties; OnJoinedRoom is only sent
+        when the Join event 255 for the local actor arrives (NetworkingPeer.OnEvent)."""
+        _, raw = decode_protocol16_parameters_raw(plaintext)
+        self.room = raw   # 255 RoomName, 238, 249, 248, 250, 241, 232, 235, 236, 204, 239, 191 as received
+        player_properties = raw.get(PARAM_PLAYER_PROPERTIES, Protocol16Raw(encode_protocol16_value({})))
+        game_properties = raw.get(PARAM_GAME_PROPERTIES, Protocol16Raw(encode_protocol16_value({})))
+        room_name = decode_protocol16_value(Protocol16Reader(raw[PARAM_ROOM_NAME])) if PARAM_ROOM_NAME in raw else None
+        self.log(logging.INFO, 'GAME', 'CreateGame room=%s received keys=%s', room_name, list(raw))
+        response = encode_protocol16_operation_response(OP_CREATE_GAME, 0, None, {
+            PARAM_ACTOR_NR: LOCAL_ACTOR_NR,
+            PARAM_ACTOR_LIST: [LOCAL_ACTOR_NR],
+            PARAM_PLAYER_PROPERTIES: {LOCAL_ACTOR_NR: player_properties},
+            PARAM_GAME_PROPERTIES: game_properties,
+        })
+        frame = self.send(MSG_OPERATION_RESPONSE, response)
+        self.log(logging.INFO, 'GAME', 'CreateGame response actor=%d hex=%s', LOCAL_ACTOR_NR, frame.hex(' '))
+        event = encode_protocol16_event(EVENT_JOIN, {
+            PARAM_ACTOR_NR: LOCAL_ACTOR_NR,
+            PARAM_ACTOR_LIST: [LOCAL_ACTOR_NR],
+            PARAM_PLAYER_PROPERTIES: player_properties,
+        })
+        frame = self.send(MSG_EVENT, event)
+        self.log(logging.INFO, 'GAME', 'Join event sent actor=%d hex=%s', LOCAL_ACTOR_NR, frame.hex(' '))
 
     async def handle_authenticate(self, params: dict, encrypted: bool):
         self.log(logging.INFO, 'AUTH', 'OpAuthenticate encrypted=%s, %d parameters', encrypted, len(params))
