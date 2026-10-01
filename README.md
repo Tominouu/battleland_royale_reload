@@ -14,6 +14,14 @@ The original 2.9.6 client running against the private PlayFab backend and Photon
 | Training battle: drop zone selection | Parachute drop |
 | ![In-game tutorial](docs/screenshots/05-tutorial-ingame.jpg) | ![Combat HUD](docs/screenshots/06-combat-hud.jpg) |
 | In-game tutorial | Combat with HUD and practice bots |
+| ![Multiplayer Select Item](docs/screenshots/multiplayer/1.png) | ![Preparing Matchmaking](docs/screenshots/multiplayer/2.png) |
+| Multiplayer lobby with connected players | Matchmaking with other players |
+| ![Multiplayer battle](docs/screenshots/multiplayer/3.png) | ![Spawn](docs/screenshots/multiplayer/4.png) |
+| Multiplayer battle in progress | Team-based combat |
+| ![Player interaction](docs/screenshots/multiplayer/5.png) | ![Multiplayer game](docs/screenshots/multiplayer/6.png) |
+| Player interaction during a multiplayer match | Multiplayer scoreboard |
+| ![Multiplayer fight](docs/screenshots/multiplayer/7.png) | ![New area alert](docs/screenshots/multiplayer/8.png) |
+| Match results and player statistics | Lobby after the multiplayer match |
 
 ## Structure
 
