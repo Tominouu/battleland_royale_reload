@@ -3,6 +3,7 @@ import time
 from flask import jsonify
 
 from playfab.auth import _sessions, error
+from storage.player_data import get_read_only_data, update_read_only_data
 
 # .NET DateTime.Ticks at the Unix epoch (100 ns units since 0001-01-01)
 _DOTNET_EPOCH_TICKS = 621355968000000000
@@ -12,7 +13,26 @@ def _now_ticks():
     return _DOTNET_EPOCH_TICKS + time.time_ns() // 100
 
 
-def _initialize_data_s5(params):
+class CloudScriptError(Exception):
+    """Returned as ExecuteCloudScriptResult.Error; PlayFabRX.<ExecuteCloudScript>b__17_1 turns any non-null
+    Error into a PlayFabException (code 1211), which SavePlayerData reports to PlayFabRunner.ConnectionError."""
+
+    def __init__(self, name, message):
+        super().__init__(message)
+        self.name = name
+        self.message = message
+
+
+# PlayFabRunner.SessionId: Guid generated once per app process, sent by initializeDataS5 and saveS5.
+# Kept in UserReadOnlyData["SessionId"]; SetupPlayerDataFromLogin drops that key before InitPlayerData.
+SESSION_ID_KEY = "SessionId"
+# Serialized PlayerData sections (PlayerDataSerializer.To*JSON), read back by PlayFabRunner.InitPlayerData
+SAVED_SECTIONS = ("Base", "Game", "Extra")
+
+
+def _initialize_data_s5(params, playfab_id):
+    if isinstance(params.get("SessionId"), str):
+        update_read_only_data(playfab_id, {SESSION_ID_KEY: params["SessionId"]})
     # PlayFabRunner.<InitializeMiscellaneousData>b__55_0 deserializes this as InitializeDataResponse:
     # MatchBoxTokenDataJson must be a JSON object string, VirtualCurrency must be non-null.
     # Catalogs["SeasonItems_14"] is read unchecked by PlayFabRunner.CrosscheckAndResolvePlayerData
@@ -43,7 +63,21 @@ def _initialize_data_s5(params):
     }
 
 
-def _now_ticks_function(params):
+def _save_s5(params, playfab_id):
+    # PlayFabRunner.SavePlayerData: SaveParams {Base, Game, Extra, SkinCountsById: JSON strings, SessionId,
+    # HasSeasonPass}. The client ignores FunctionResult (b__78_0 is empty, b__78_2 returns true).
+    # Only a save from the session registered by the latest initializeDataS5 may overwrite the player data.
+    session_id = params.get("SessionId")
+    if not session_id or session_id != get_read_only_data(playfab_id).get(SESSION_ID_KEY):
+        raise CloudScriptError("JavascriptException", "saveS5: SessionId does not match the active session")
+    sections = {k: params[k] for k in SAVED_SECTIONS if k in params}
+    if not all(isinstance(v, str) for v in sections.values()):
+        raise CloudScriptError("JavascriptException", "saveS5: Base, Game and Extra must be JSON strings")
+    update_read_only_data(playfab_id, sections)
+    return None
+
+
+def _now_ticks_function(params, playfab_id):
     # PlayFabRunner.ServerNowTicks: Convert.ToInt64(FunctionResult), compared with DateTime.UtcNow.Ticks
     return _now_ticks()
 
@@ -51,6 +85,7 @@ def _now_ticks_function(params):
 _FUNCTIONS = {
     "initializeDataS5": _initialize_data_s5,
     "nowTicks": _now_ticks_function,
+    "saveS5": _save_s5,
 }
 
 
@@ -65,11 +100,14 @@ def execute_cloud_script(request_json, session_ticket):
         # Other CloudScript functions are not implemented yet (same answer as before this route existed)
         return jsonify(error("Unknown endpoint: /Client/ExecuteCloudScript", 404))
 
+    data = {"FunctionName": name}
+    try:
+        data["FunctionResult"] = function((request_json or {}).get("FunctionParameter") or {}, playfab_id)
+    except CloudScriptError as e:
+        # A throwing CloudScript still answers HTTP 200 / code 200, with ExecuteCloudScriptResult.Error set
+        data["Error"] = {"Error": e.name, "Message": e.message, "StackTrace": None}
     return jsonify({
         "code": 200,
         "status": "OK",
-        "data": {
-            "FunctionName": name,
-            "FunctionResult": function((request_json or {}).get("FunctionParameter") or {}),
-        }
+        "data": data,
     })

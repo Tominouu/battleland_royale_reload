@@ -11,6 +11,7 @@ from playfab.auth import (
     link_custom_id,
     link_android_device_id,
     get_photon_authentication_token,
+    update_user_title_display_name,
     error,
 )
 from playfab.data import (
@@ -58,6 +59,7 @@ _ROUTES = {
     "/Client/LinkCustomID": link_custom_id,
     "/Client/LinkAndroidDeviceID": link_android_device_id,
     "/Client/GetPhotonAuthenticationToken": get_photon_authentication_token,
+    "/Client/UpdateUserTitleDisplayName": update_user_title_display_name,
     "/Client/GetUserReadOnlyData": get_user_read_only_data,
     "/Client/GetUserInventory": get_user_inventory,
     "/Client/GetCatalogItems": get_catalog_items,

@@ -3,9 +3,19 @@ import json
 import time
 from flask import jsonify
 
+from playfab.photon_tokens import issue_token
+from storage.player_data import get_read_only_data
+
 # In-memory session store
 _sessions = {}
 _players = {}
+# PlayFabId -> title display name (UpdateUserTitleDisplayName); keyed by PlayFabId because several
+# _players entries (android:/custom: links) can share one account
+_display_names = {}
+
+# PlayFab limits for UpdateUserTitleDisplayNameRequest.DisplayName
+DISPLAY_NAME_MIN_LENGTH = 3
+DISPLAY_NAME_MAX_LENGTH = 25
 
 def _make_playfab_id():
     # Real PlayFab IDs are 16 hex chars; the client converts them (TeamHelper.PlayFabIdToUInt64)
@@ -38,7 +48,7 @@ def _info_payload(params, playfab_id):
             "PlayFabId": playfab_id,
             "Created": "2026-01-01T00:00:00Z",
             # SetupPlayerDataFromLogin dereferences TitleInfo unchecked; DisplayName -> BattleTag ("" if empty)
-            "TitleInfo": {"DisplayName": None},
+            "TitleInfo": {"DisplayName": _display_names.get(playfab_id)},
         }
     if params.get("GetPlayerProfile"):
         payload["PlayerProfile"] = {"PlayerId": playfab_id}
@@ -76,8 +86,12 @@ def _info_payload(params, playfab_id):
             "ExcludedSkinItems_14": "[]",
         }
     if params.get("GetUserReadOnlyData"):
+        # Stored keys (SessionId, Base/Game/Extra from saveS5) as UserDataRecords; InitPlayerData reads
+        # Base/Game/Extra and treats missing ones as empty JSON objects
+        payload["UserReadOnlyData"] = {k: {"Value": v} for k, v in get_read_only_data(playfab_id).items()
+                                       if isinstance(v, str)}
         # SetupPlayerDataFromLogin reads this key unchecked; SetupSeasonStats needs a JSON object string
-        payload["UserReadOnlyData"] = {"SeasonStatsHistory": {"Value": "{}"}}
+        payload["UserReadOnlyData"]["SeasonStatsHistory"] = {"Value": "{}"}
     if params.get("GetPlayerStatistics"):
         # PlayFabRunner.CheckAndUpdateSeason: Season == 14 skips ExecuteCloudScript("startSeason14")
         payload["PlayerStatistics"] = [{"StatisticName": "Season", "Value": 14}]
@@ -156,7 +170,8 @@ def get_photon_authentication_token(request_json, session_ticket):
     if not playfab_id:
         return jsonify(error("Not authorized", 401))
 
-    token = str(uuid.uuid4()).replace("-", "")
+    # Bound to the PlayFabId and the requested AppId; checked by photon-master via /internal/photon/validate
+    token = issue_token(playfab_id, (request_json or {}).get("PhotonApplicationId"))
 
     return jsonify({
         "code": 200,
@@ -166,6 +181,34 @@ def get_photon_authentication_token(request_json, session_ticket):
             "PhotonCustomAuthenticationToken": token,
         }
     })
+
+def update_user_title_display_name(request_json, session_ticket):
+    playfab_id = _sessions.get(session_ticket)
+    if not playfab_id:
+        return jsonify(error("Not authorized", 401))
+
+    # The client sends "<name>#" (PlayFabRunner.UpdateUserTitleDisplayName) and copies the returned
+    # DisplayName into PlayerData.BattleTag (UILobby.SetNameSuccess)
+    display_name = (request_json or {}).get("DisplayName")
+    if not isinstance(display_name, str) or not DISPLAY_NAME_MIN_LENGTH <= len(display_name) <= DISPLAY_NAME_MAX_LENGTH:
+        return jsonify(playfab_error(
+            "InvalidParams", 1000, "Invalid input parameters",
+            {"DisplayName": [f"The DisplayName field must be a string with a length between "
+                             f"{DISPLAY_NAME_MIN_LENGTH} and {DISPLAY_NAME_MAX_LENGTH}."]}))
+
+    _display_names[playfab_id] = display_name
+    return jsonify({
+        "code": 200,
+        "status": "OK",
+        "data": {"DisplayName": display_name},
+    })
+
+def playfab_error(name, error_code, message, details=None):
+    """PlayFab error body; the client branches on errorCode (e.g. UILobby.SetNameError: 1058, 1234)."""
+    body = {"code": 400, "status": "BadRequest", "error": name, "errorCode": error_code, "errorMessage": message}
+    if details:
+        body["errorDetails"] = details
+    return body
 
 def error(message, code=400):
     return {
