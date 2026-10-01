@@ -2,6 +2,7 @@
 
 Run: python3 photon-master/tests/test_quantum.py -v
 """
+import hashlib
 import os
 import sys
 import unittest
@@ -20,6 +21,20 @@ CLIENT_JOIN = bytes.fromhex(
 #   SessionConfig type 3 (bits 58-65), Requested 1 (bit 66), config null 1 (bit 67)
 #   RuntimeConfig type 4 (bits 68-75), Requested 1 (bit 76), byte[] present 0 (bit 77); 2 padding bits
 PROBE = bytes.fromhex('02 07 00 00 00 00 00 0c 4c 10')
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
+# Client answer to the probe (build/quantum-probe-test/logs/c2s-event100-1793.bin): SessionConfig + RuntimeConfig
+with open(os.path.join(FIXTURES, 'client-config-reply.bin'), 'rb') as f:
+    CLIENT_CONFIG_REPLY = f.read()
+# RuntimeConfig bytes of that answer (build/quantum-probe-test/logs/runtimeconfig-1707.bin)
+with open(os.path.join(FIXTURES, 'runtimeconfig-1707.bin'), 'rb') as f:
+    RUNTIME_CONFIG = f.read()
+SESSION_CONFIG_BIT, SESSION_CONFIG_BITS = 9, 648   # after type (8) and Requested (1); null bit included
+
+
+def simulation_start_from_capture():
+    bits = quantum.read_raw_bits(CLIENT_CONFIG_REPLY, SESSION_CONFIG_BIT, SESSION_CONFIG_BITS)
+    return quantum.simulation_start(RUNTIME_CONFIG, bits, SESSION_CONFIG_BITS)
 
 
 class BitStreamTests(unittest.TestCase):
@@ -107,10 +122,63 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(session['Config']['InputFixedSize'], len(quantum.SESSION_CONFIG_FIELDS_V2) - 1)
         self.assertEqual((runtime['Requested'], runtime['Config']), (False, b'\x01\x02\x03'))
 
+    def test_captured_reply_layout(self):
+        session, runtime, padding = quantum.decode_messages(CLIENT_CONFIG_REPLY)
+        self.assertEqual(session['config_bits'], (SESSION_CONFIG_BIT, SESSION_CONFIG_BITS))
+        self.assertEqual(runtime['Config'], RUNTIME_CONFIG)
+        self.assertEqual((len(RUNTIME_CONFIG), padding), (1707, {'padding_bits': 5}))
+
+    def test_double_is_little_endian_ieee754(self):
+        w = quantum.BitWriter()
+        w.write_double(1.0)
+        self.assertEqual(w.to_bytes(), bytes.fromhex('00 00 00 00 00 00 f0 3f'))
+        self.assertEqual(quantum.BitReader(w.to_bytes()).read_double(), 1.0)
+
     def test_unknown_type_stops_decoding(self):
         msgs = quantum.decode_messages(bytes([0x63, 0xFF]))
         self.assertEqual((len(msgs), msgs[0]['type'], msgs[0].get('undecoded')), (1, 0x63, True))
 
+
+class SimulationStartTests(unittest.TestCase):
+    def setUp(self):
+        self.start = simulation_start_from_capture()
+        self.reader = quantum.BitReader(self.start)
+
+    def test_length_is_1800_bytes(self):
+        # 8 + 1 + 64 + (1 + 16 + 1707 * 8) + 648 = 14394 bits
+        self.assertEqual(len(self.start), 1800)
+
+    def test_byte_aligned_prefix(self):
+        # type 5 | Reconnect 0 + ServerTime 0.0 (bits 8-72) | presence 1 (bit 73), length 1707 (bits 74-89),
+        # first RuntimeConfig bits: hand-derived, 0x6AB = 0b11010101011, RUNTIME_CONFIG[0] = 0xb1
+        self.assertEqual(self.start[:12], bytes.fromhex('05 00 00 00 00 00 00 00 00 ae 1a c4'))
+
+    def test_fields(self):
+        r = self.reader
+        self.assertEqual((r.read(8), r.read_bool(), r.read_double()), (5, False, 0.0))
+        self.assertEqual((r.read_bool(), r.read(16)), (True, 1707))
+        self.assertEqual(r.read_bytes(1707), RUNTIME_CONFIG)
+        self.assertEqual(r.pos, 13746)
+        self.assertEqual(r.read(SESSION_CONFIG_BITS),
+                         quantum.read_raw_bits(CLIENT_CONFIG_REPLY, SESSION_CONFIG_BIT, SESSION_CONFIG_BITS))
+        self.assertEqual(r.pos, 14394)
+
+    def test_padding_is_six_zero_bits(self):
+        self.reader.pos = 14394
+        self.assertEqual(self.reader.read(6), 0)
+        self.assertFalse(self.reader.can_read(1))
+
+    def test_decodes_as_single_simulation_start(self):
+        start, padding = quantum.decode_messages(self.start)
+        session = quantum.decode_messages(CLIENT_CONFIG_REPLY)[0]['Config']
+        self.assertEqual((start['name'], start['Reconnect'], start['ServerTime']), ('SimulationStart', False, 0.0))
+        self.assertEqual((start['RuntimeConfig'], start['SessionConfig']), (RUNTIME_CONFIG, session))
+        self.assertEqual((start['SessionConfig']['PlayerCount'], start['SessionConfig']['UpdateFPS']), (1, 30))
+        self.assertEqual(padding, {'padding_bits': 6})
+
+    def test_sha256(self):
+        self.assertEqual(hashlib.sha256(self.start).hexdigest(),
+                         'bdc664a12376eb65ed99adba866c65648a0d3837f750f729728e3518dfc91da1')
 
 if __name__ == '__main__':
     unittest.main()

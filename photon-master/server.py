@@ -5,8 +5,9 @@ Scope: TCP framing, Init, ping, Diffie-Hellman key exchange (internal op 0), enc
 OpAuthenticate (230) checked against battlelands-server (POST /internal/photon/validate), then keep
 the connection alive. The Master answers CreateGame (227) with a room name and the GameServer address;
 the GameServer answers CreateGame by entering the client as actor 1 (OperationResponse 227 + Join event 255)
-and otherwise only logs what the client sends. No room manager. Quantum: only a config probe answers the
-first Quantum Join (see handle_game_raise_event); no SimulationStart, no input (102) handling.
+and otherwise only logs what the client sends. No room manager. Quantum: a config probe answers the first
+Quantum Join, then one SimulationStart follows the client's configurations (see handle_game_raise_event);
+no input (102) handling.
 
 Wire format (capture build/photon-appid/logs/photon-4530.pcap + TPeer.SerializeOperationToMessage):
   framed:  FB | len:u32 BE (whole frame) | channel:u8 | 01 | F3 | msgType:u8 | body
@@ -353,6 +354,8 @@ def describe_value(key: int, value) -> str:
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_VALIDATE_URL = 'https://192.168.240.1/internal/photon/validate'
 DEFAULT_BACKEND_CA = os.path.join(REPO_ROOT, 'build', 'tls', 'ca.pem')
+# RuntimeConfig bytes sent by the real client (build/quantum-probe-test), reused verbatim in SimulationStart
+DEFAULT_QUANTUM_RUNTIME_CONFIG = os.path.join(REPO_ROOT, 'build', 'quantum-probe-test', 'logs', 'runtimeconfig-1707.bin')
 
 
 def parse_auth_get_parameters(query: str) -> tuple[str | None, str | None]:
@@ -395,8 +398,10 @@ class PhotonConnection:
     """One client connection; Master and GameServer share framing, DH/AES and custom authentication."""
 
     def __init__(self, conn_id: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                 validator: BackendTokenValidator, role: str = ROLE_MASTER, game_server_address: str | None = None):
+                 validator: BackendTokenValidator, role: str = ROLE_MASTER, game_server_address: str | None = None,
+                 runtime_config: bytes | None = None):
         self.id = conn_id
+        self.runtime_config = runtime_config
         self.validator = validator
         self.role = role
         self.game_server_address = game_server_address
@@ -406,6 +411,10 @@ class PhotonConnection:
         self.aes_key: bytes | None = None
         self.authenticated = False
         self.quantum_probe_sent = False
+        self.client_session_config: int | None = None   # DeterministicSessionConfig bits (null bit included)
+        self.client_session_config_bit_count = 0
+        self.client_runtime_config: bytes | None = None
+        self.simulation_start_sent = False
         self.started = time.monotonic()
 
     def log(self, level: int, tag: str, msg: str, *args):
@@ -587,7 +596,10 @@ class PhotonConnection:
         messages = quantum.decode_messages(data)
         for msg in messages:
             self.log(logging.INFO, 'QUANTUM', 'C>S   %s', quantum.describe_message(msg))
-        if self.quantum_probe_sent or not messages or messages[0].get('type') != quantum.MSG_JOIN:
+        if self.quantum_probe_sent:
+            self.collect_client_configs(data, messages)
+            return
+        if not messages or messages[0].get('type') != quantum.MSG_JOIN:
             return
         probe = quantum.config_probe()
         self.log(logging.INFO, 'QUANTUM', 'S>C probe event %d byte[%d] hex=%s', QUANTUM_EVENT_PROTOCOL,
@@ -598,6 +610,32 @@ class PhotonConnection:
         frame = self.send(MSG_EVENT, encode_protocol16_event(QUANTUM_EVENT_PROTOCOL, {PARAM_DATA: probe}))
         self.quantum_probe_sent = True
         self.log(logging.INFO, 'QUANTUM', 'S>C probe frame hex=%s', frame.hex(' '))
+
+    def collect_client_configs(self, data: bytes, messages: list[dict]):
+        """Keeps the client's answers to the probe; once both arrived, sends SimulationStart exactly once."""
+        for msg in messages:
+            if msg.get('type') == quantum.MSG_SESSION_CONFIG and not msg['Requested'] and msg['Config'] is not None:
+                start, count = msg['config_bits']
+                self.client_session_config = quantum.read_raw_bits(data, start, count)
+                self.client_session_config_bit_count = count
+            elif msg.get('type') == quantum.MSG_RUNTIME_CONFIG and not msg['Requested'] and msg['Config'] is not None:
+                self.client_runtime_config = msg['Config']
+        if self.simulation_start_sent or self.client_session_config is None or self.client_runtime_config is None:
+            return
+        if self.runtime_config is None:
+            self.log(logging.ERROR, 'QUANTUM', 'no RuntimeConfig file loaded, SimulationStart not sent')
+            return
+        self.log(logging.INFO, 'QUANTUM', 'client RuntimeConfig byte[%d] sha256=%s, file byte[%d] sha256=%s, identical=%s',
+                 len(self.client_runtime_config), sha(self.client_runtime_config), len(self.runtime_config),
+                 sha(self.runtime_config), self.client_runtime_config == self.runtime_config)
+        start = quantum.simulation_start(self.runtime_config, self.client_session_config,
+                                         self.client_session_config_bit_count)
+        self.log(logging.INFO, 'QUANTUM', 'S>C SimulationStart event %d byte[%d] sha256=%s hex=%s',
+                 QUANTUM_EVENT_PROTOCOL, len(start), sha(start), start.hex())
+        for msg in quantum.decode_messages(start):
+            self.log(logging.INFO, 'QUANTUM', 'S>C   %s', quantum.describe_message(msg))
+        self.send(MSG_EVENT, encode_protocol16_event(QUANTUM_EVENT_PROTOCOL, {PARAM_DATA: start}))
+        self.simulation_start_sent = True
 
     async def handle_authenticate(self, params: dict, encrypted: bool):
         self.log(logging.INFO, 'AUTH', 'OpAuthenticate encrypted=%s, %d parameters', encrypted, len(params))
@@ -636,17 +674,19 @@ class PhotonConnection:
 
 class PhotonTCPServer:
     def __init__(self, host: str, port: int, validator: BackendTokenValidator, role: str = ROLE_MASTER,
-                 game_server_address: str | None = None, ids: itertools.count | None = None):
+                 game_server_address: str | None = None, ids: itertools.count | None = None,
+                 runtime_config: bytes | None = None):
         self.host = host
         self.port = port
         self.validator = validator
         self.role = role
         self.game_server_address = game_server_address
         self.ids = ids or itertools.count(1)
+        self.runtime_config = runtime_config
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         await PhotonConnection(next(self.ids), reader, writer, self.validator, self.role,
-                               self.game_server_address).run()
+                               self.game_server_address, self.runtime_config).run()
 
     async def serve(self):
         server = await asyncio.start_server(self.handle, self.host, self.port)
@@ -656,11 +696,11 @@ class PhotonTCPServer:
 
 
 async def serve_master_and_game(host: str, master_port: int, game_port: int, game_server_address: str,
-                                validator: BackendTokenValidator):
+                                validator: BackendTokenValidator, runtime_config: bytes | None = None):
     ids = itertools.count(1)   # shared, so #N is unique across both listeners
     await asyncio.gather(
         PhotonTCPServer(host, master_port, validator, ROLE_MASTER, game_server_address, ids).serve(),
-        PhotonTCPServer(host, game_port, validator, ROLE_GAME, None, ids).serve())
+        PhotonTCPServer(host, game_port, validator, ROLE_GAME, None, ids, runtime_config).serve())
 
 
 def main():
@@ -674,6 +714,8 @@ def main():
                     help='battlelands-server token validation endpoint (default %(default)s)')
     ap.add_argument('--backend-ca', default=DEFAULT_BACKEND_CA,
                     help='CA certificate of the backend TLS certificate (default %(default)s)')
+    ap.add_argument('--quantum-runtime-config', default=DEFAULT_QUANTUM_RUNTIME_CONFIG,
+                    help='RuntimeConfig bytes sent in SimulationStart (default %(default)s)')
     ap.add_argument('-v', '--verbose', action='store_true', help='also log every outgoing frame in hex')
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -681,7 +723,16 @@ def main():
     try:
         validator = BackendTokenValidator(args.validate_url, args.backend_ca)
         log.info('[AUTH] custom authentication via %s', args.validate_url)
-        asyncio.run(serve_master_and_game(args.host, args.port, args.game_port, args.game_address, validator))
+        runtime_config = None
+        if os.path.exists(args.quantum_runtime_config):
+            with open(args.quantum_runtime_config, 'rb') as f:
+                runtime_config = f.read()
+            log.info('[QUANTUM] RuntimeConfig %s byte[%d] sha256=%s', args.quantum_runtime_config,
+                     len(runtime_config), sha(runtime_config))
+        else:
+            log.warning('[QUANTUM] no RuntimeConfig at %s: SimulationStart disabled', args.quantum_runtime_config)
+        asyncio.run(serve_master_and_game(args.host, args.port, args.game_port, args.game_address, validator,
+                                          runtime_config))
     except KeyboardInterrupt:
         pass
 

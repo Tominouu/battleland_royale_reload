@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import quantum  # noqa: E402
 import server  # noqa: E402
 
 APP_ID = '774b10b9-5bfb-48a7-9971-55300fc0d4bd'
@@ -131,6 +132,12 @@ QUANTUM_JOIN = bytes.fromhex(
 RAISE_EVENT_QUANTUM_JOIN = (bytes.fromhex('fd 0003 f4 62 64 f5 78 0000003d') + QUANTUM_JOIN
                             + bytes.fromhex('fc 79 0001 69 00000000'))
 QUANTUM_PROBE = bytes.fromhex('02 07 00 00 00 00 00 0c 4c 10')
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
+with open(os.path.join(FIXTURES, 'client-config-reply.bin'), 'rb') as f:
+    CLIENT_CONFIG_REPLY = f.read()   # SessionConfig + RuntimeConfig in one byte[] (real client)
+with open(os.path.join(FIXTURES, 'runtimeconfig-1707.bin'), 'rb') as f:
+    RUNTIME_CONFIG = f.read()
+SIMULATION_START_SHA256 = 'bdc664a12376eb65ed99adba866c65648a0d3837f750f729728e3518dfc91da1'
 
 
 def raise_event(code, data):
@@ -177,7 +184,7 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
     async def start(self, url):
         validator = server.BackendTokenValidator(url, None, timeout=2)
         master = server.PhotonTCPServer('127.0.0.1', 0, validator, server.ROLE_MASTER, GAME_SERVER_ADDRESS)
-        game = server.PhotonTCPServer('127.0.0.1', 0, validator, server.ROLE_GAME)
+        game = server.PhotonTCPServer('127.0.0.1', 0, validator, server.ROLE_GAME, runtime_config=RUNTIME_CONFIG)
         self.tcp = await asyncio.start_server(master.handle, '127.0.0.1', 0)
         self.game_tcp = await asyncio.start_server(game.handle, '127.0.0.1', 0)
         self.port = self.tcp.sockets[0].getsockname()[1]
@@ -384,6 +391,48 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
         pong = await reader.readexactly(9)
         writer.close()
         self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x05'))
+
+    async def probed_game_server(self):
+        reader, writer = await self.joined_game_server()
+        writer.write(frame(2, RAISE_EVENT_QUANTUM_JOIN))
+        await read_frame(reader)   # probe
+        return reader, writer
+
+    async def test_simulation_start_after_client_configs(self):
+        reader, writer = await self.probed_game_server()
+        writer.write(frame(2, raise_event(100, CLIENT_CONFIG_REPLY)))
+        code, params = decode_event(await read_frame(reader))
+        writer.close()
+        self.assertEqual((code, list(params)), (100, [245]))
+        self.assertEqual(len(params[245]), 1800)
+        self.assertEqual(hashlib.sha256(params[245]).hexdigest(), SIMULATION_START_SHA256)
+
+    async def test_simulation_start_waits_for_both_configs(self):
+        # same configs in two events (SessionConfig, then RuntimeConfig): SimulationStart only after the second
+        w = quantum.BitWriter()   # SessionConfig message alone: bits 0-656 of the real answer
+        w.write(quantum.read_raw_bits(CLIENT_CONFIG_REPLY, 0, 657), 657)
+        runtime = quantum.BitWriter()
+        runtime.write(quantum.MSG_RUNTIME_CONFIG, 8)
+        runtime.write_bool(False)
+        runtime.write_byte_array(RUNTIME_CONFIG)
+        reader, writer = await self.probed_game_server()
+        writer.write(frame(2, raise_event(100, w.to_bytes())) + b'\xf0\x00\x00\x00\x06')
+        pong = await reader.readexactly(9)
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x06'))
+        writer.write(frame(2, raise_event(100, runtime.to_bytes())))
+        code, params = decode_event(await read_frame(reader))
+        writer.close()
+        self.assertEqual(hashlib.sha256(params[245]).hexdigest(), SIMULATION_START_SHA256)
+
+    async def test_simulation_start_sent_once_and_102_not_answered(self):
+        reader, writer = await self.probed_game_server()
+        writer.write(frame(2, raise_event(100, CLIENT_CONFIG_REPLY)))
+        await read_frame(reader)   # SimulationStart
+        writer.write(frame(2, raise_event(100, CLIENT_CONFIG_REPLY)) + frame(2, raise_event(102, b'\x01\x02'))
+                     + b'\xf0\x00\x00\x00\x07')
+        pong = await reader.readexactly(9)
+        writer.close()
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x07'))
 
     def test_parse_auth_get_parameters(self):
         self.assertEqual(server.parse_auth_get_parameters(f'username={PLAYFAB_ID}&token={TOKEN}'), (PLAYFAB_ID, TOKEN))

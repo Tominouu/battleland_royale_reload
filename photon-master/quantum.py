@@ -12,13 +12,17 @@ Field encodings (BitStream.Serialize overloads in libil2cpp 2.9.6):
   string      1 bit (1 = null), ushort length, UTF-8 bytes            (0x17CE144 / ReadString 0x17CE1D8)
   int[]       1 bit (1 = present), ushort count, 32 bits per element  (0x17CD554)
   byte[]      1 bit (1 = present), ushort length, bytes               (WriteByteArrayLengthPrefixed 0x17CD80C)
+  double      64 bits: the 8 IEEE-754 little-endian bytes, byte 0 first (WriteDouble 0x17CE4DC / ReadDouble 0x17CE610)
   DeterministicSessionConfig  1 bit (1 = null), then fields           (0x17DD628)
 """
+
+import struct
 
 MSG_JOIN = 1
 MSG_JOINED = 2
 MSG_SESSION_CONFIG = 3
 MSG_RUNTIME_CONFIG = 4
+MSG_SIMULATION_START = 5
 MSG_NAMES = {1: 'Join', 2: 'Joined', 3: 'SessionConfig', 4: 'RuntimeConfig', 5: 'SimulationStart',
              6: 'SimulationStop', 7: 'ClockCorrect', 8: 'TickChecksum', 9: 'TickChecksumError', 10: 'RttUpdate',
              11: 'SetPlayerData', 12: 'Disconnect', 13: 'FrameSnapshot', 14: 'Command',
@@ -68,6 +72,10 @@ class BitWriter:
             for v in values:
                 self.write(v & 0xFFFFFFFF, 32)
 
+    def write_double(self, value: float):
+        for b in struct.pack('<d', value):
+            self.write(b, 8)
+
     def write_byte_array(self, value: bytes | None):
         self.write_bool(value is not None)
         if value is not None:
@@ -103,6 +111,9 @@ class BitReader:
     def read_int(self) -> int:
         value = self.read(32)
         return value - (1 << 32) if value & 0x80000000 else value
+
+    def read_double(self) -> float:
+        return struct.unpack('<d', self.read_bytes(8))[0]
 
     def read_bytes(self, count: int) -> bytes:
         return bytes(self.read(8) for _ in range(count))
@@ -157,6 +168,26 @@ def config_probe() -> bytes:
     return writer.to_bytes()
 
 
+def read_raw_bits(data: bytes, start: int, count: int) -> int:
+    """Bits [start, start+count) of a BitStream as an LSB-first integer, to copy them verbatim with BitWriter.write."""
+    reader = BitReader(data)
+    reader.pos = start
+    return reader.read(count)
+
+
+def simulation_start(runtime_config: bytes, session_config_bits: int, session_config_bit_count: int,
+                     reconnect: bool = False, server_time: float = 0.0) -> bytes:
+    """SimulationStart (SimulationStart.Serialize 0x24CFC1C): type 5, Reconnect, ServerTime, RuntimeConfig as a
+    length-prefixed byte[], then the DeterministicSessionConfig bits copied verbatim (null bit included)."""
+    writer = BitWriter()
+    writer.write(MSG_SIMULATION_START, 8)
+    writer.write_bool(reconnect)
+    writer.write_double(server_time)
+    writer.write_byte_array(runtime_config)
+    writer.write(session_config_bits, session_config_bit_count)
+    return writer.to_bytes()
+
+
 def decode_messages(data: bytes) -> list[dict]:
     """Decodes every message like Serializer.ReadNext (while 8 bits remain). Unknown types stop decoding;
     the entry then carries the bit position so the raw bytes can be analysed."""
@@ -173,9 +204,18 @@ def decode_messages(data: bytes) -> list[dict]:
             elif msg_type == MSG_JOINED:
                 msg.update(Confirmed=reader.read_bool(), PlayerSlots=reader.read_int_array())
             elif msg_type == MSG_SESSION_CONFIG:
-                msg.update(Requested=reader.read_bool(), Config=reader.read_session_config())
+                msg['Requested'] = reader.read_bool()
+                config_bit = reader.pos
+                msg['Config'] = reader.read_session_config()
+                msg['config_bits'] = (config_bit, reader.pos - config_bit)   # null bit included
             elif msg_type == MSG_RUNTIME_CONFIG:
                 msg.update(Requested=reader.read_bool(), Config=reader.read_byte_array())
+            elif msg_type == MSG_SIMULATION_START:
+                msg.update(Reconnect=reader.read_bool(), ServerTime=reader.read_double(),
+                           RuntimeConfig=reader.read_byte_array())
+                config_bit = reader.pos
+                msg['SessionConfig'] = reader.read_session_config()
+                msg['config_bits'] = (config_bit, reader.pos - config_bit)
             else:
                 msg['undecoded'] = True
                 messages.append(msg)
