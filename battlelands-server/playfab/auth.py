@@ -4,14 +4,22 @@ import time
 from flask import jsonify
 
 from playfab.photon_tokens import issue_token
-from storage.player_data import get_read_only_data
+from storage.player_data import (get_account, get_display_name, get_read_only_data, link_account,
+                                 set_display_name)
 
 # In-memory session store
 _sessions = {}
+# Login key -> player; a cache of storage/players/accounts.json so accounts survive server restarts
 _players = {}
 # PlayFabId -> title display name (UpdateUserTitleDisplayName); keyed by PlayFabId because several
-# _players entries (android:/custom: links) can share one account
+# _players entries (android:/custom: links) can share one account. Cache of players/<id>/profile.json
 _display_names = {}
+
+
+def _display_name(playfab_id):
+    if playfab_id not in _display_names:
+        _display_names[playfab_id] = get_display_name(playfab_id)
+    return _display_names[playfab_id]
 
 # PlayFab limits for UpdateUserTitleDisplayNameRequest.DisplayName
 DISPLAY_NAME_MIN_LENGTH = 3
@@ -48,7 +56,7 @@ def _info_payload(params, playfab_id):
             "PlayFabId": playfab_id,
             "Created": "2026-01-01T00:00:00Z",
             # SetupPlayerDataFromLogin dereferences TitleInfo unchecked; DisplayName -> BattleTag ("" if empty)
-            "TitleInfo": {"DisplayName": _display_names.get(playfab_id)},
+            "TitleInfo": {"DisplayName": _display_name(playfab_id)},
         }
     if params.get("GetPlayerProfile"):
         payload["PlayerProfile"] = {"PlayerId": playfab_id}
@@ -101,10 +109,13 @@ def _login(account_key, request_json):
     """Shared LoginWith* handler: LoginResult as defined by the client's PlayFab SDK 2.66."""
     request_json = request_json or {}
     player = _players.get(account_key)
+    if player is None and (linked_id := get_account(account_key)):
+        player = _players[account_key] = {"PlayFabId": linked_id}
     created = player is None
     if created:
         player = {"PlayFabId": _make_playfab_id(), "TitleId": request_json.get("TitleId", "")}
         _players[account_key] = player
+        link_account(account_key, player["PlayFabId"])
     pf_id = player["PlayFabId"]
 
     session_ticket = _make_session_ticket(pf_id)
@@ -143,6 +154,7 @@ def link_custom_id(request_json, session_ticket):
     _players[custom_id] = _players.get(custom_id, {})
     _players[custom_id]["PlayFabId"] = playfab_id
     _players[custom_id]["CustomId"] = custom_id
+    link_account(custom_id, playfab_id)
 
     return jsonify({
         "code": 200,
@@ -157,6 +169,8 @@ def link_android_device_id(request_json, session_ticket):
         return jsonify(error("Not authorized", 401))
 
     device_id = (request_json or {}).get("AndroidDeviceId", "")
+    if "android:" + device_id not in _players and not get_account("android:" + device_id):
+        link_account("android:" + device_id, playfab_id)
     _players.setdefault("android:" + device_id, {"PlayFabId": playfab_id})
 
     return jsonify({
@@ -197,6 +211,7 @@ def update_user_title_display_name(request_json, session_ticket):
                              f"{DISPLAY_NAME_MIN_LENGTH} and {DISPLAY_NAME_MAX_LENGTH}."]}))
 
     _display_names[playfab_id] = display_name
+    set_display_name(playfab_id, display_name)
     return jsonify({
         "code": 200,
         "status": "OK",

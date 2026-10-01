@@ -29,6 +29,39 @@ def update_read_only_data(playfab_id, data):
     with open(path, "w") as f:
         json.dump(existing, f)
 
+def _accounts_path():
+    d = os.path.join(DATA_DIR, "players")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "accounts.json")
+
+def _load_accounts():
+    path = _accounts_path()
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def get_account(account_key):
+    """PlayFabId linked to a login key ("android:<id>", "custom:<id>"), kept across server restarts."""
+    return _load_accounts().get(account_key)
+
+def link_account(account_key, playfab_id):
+    accounts = _load_accounts()
+    accounts[account_key] = playfab_id
+    with open(_accounts_path(), "w") as f:
+        json.dump(accounts, f)
+
+def get_display_name(playfab_id):
+    path = os.path.join(_player_path(playfab_id), "profile.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f).get("DisplayName")
+    return None
+
+def set_display_name(playfab_id, display_name):
+    with open(os.path.join(_player_path(playfab_id), "profile.json"), "w") as f:
+        json.dump({"DisplayName": display_name}, f)
+
 def get_inventory(playfab_id):
     path = os.path.join(_player_path(playfab_id), "inventory.json")
     if os.path.exists(path):
