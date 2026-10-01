@@ -83,6 +83,9 @@ class BitWriter:
             for b in value:
                 self.write(b, 8)
 
+    def round_to_byte(self):
+        self.write(0, -self.bits % 8)
+
     def to_bytes(self) -> bytes:
         return bytes(self.data)
 
@@ -107,6 +110,9 @@ class BitReader:
 
     def read_bool(self) -> bool:
         return self.read(1) == 1
+
+    def round_to_byte(self):
+        self.pos += -self.pos % 8
 
     def read_int(self) -> int:
         value = self.read(32)
@@ -235,3 +241,96 @@ def describe_message(msg: dict) -> str:
     fields = {k: (f'byte[{len(v)}] {v.hex()}' if isinstance(v, bytes) else v) for k, v in msg.items()
               if k not in ('type', 'name')}
     return f"{msg.get('name', '')}({msg.get('type', '')}) {fields}" if 'type' in msg else str(fields)
+
+
+# --- input events (code 102) ---------------------------------------------------------------------------------------
+# The two directions use different serializers.
+
+INPUT_FLAG_REPEATABLE = 1   # DeterministicInputFlags
+INPUT_RECORD_MIN_BITS = 8 + 32 + 1 + 1 + 8
+
+
+def decode_client_inputs(data: bytes) -> list[dict]:
+    """Client -> server: DeterministicNetwork.SendLocalInput (0x17D31B0) concatenates
+    DeterministicTickInput.SimpleSerialize (0x17D3AD0) records, no header: PlayerIndex (8), Tick (32),
+    Data (presence bit, ushort length, bytes), Rpc (presence bit, ushort length, bytes), Flags (8)."""
+    reader = BitReader(data)
+    inputs = []
+    while reader.can_read(INPUT_RECORD_MIN_BITS):
+        inputs.append({'PlayerIndex': reader.read(8), 'Tick': reader.read_int(), 'Data': reader.read_byte_array(),
+                       'Rpc': reader.read_byte_array(), 'Flags': reader.read(8)})
+    return inputs
+
+
+def encode_server_inputs(ticks: list[tuple[int, list[tuple[bytes, int] | None]]], player_count: int,
+                         input_fixed_size: int | None, max_ping: int = 0, server_time: float = 0.0,
+                         server_time_scale: float = 1.0) -> bytes:
+    """Server -> client, read by DeterministicTickInputDecoder.Decode (0x17D4210).
+
+    Header (DeterministicTickInputEncodeHeader, 0x17E2594): MaxPing (32), ServerTime (double), ServerTimeScale
+    (double), PlayerCount (8), InputFixedSizeEnabled (1), InputFixedSize (10, only if enabled).
+    Then per tick, byte aligned (RoundToByte): Tick (32), Completed (1), player mask (PlayerCount bits), and for
+    each player in the mask DeterministicTickInput.SerializeForDecoder (0x17E1E10): Absent (1); Data as presence
+    bit + exactly InputFixedSize bytes (fixed size, 0x17CDFA0) or presence bit + ushort length + bytes; Rpc
+    (presence bit, ushort length, bytes); Flags (4 bits).
+
+    ticks: [(tick, [per player (data, flags) or None when not in the mask])], all ticks marked Completed.
+    The decoder reads blocks while position + 32 <= length, so trailing padding stays below 32 bits."""
+    writer = BitWriter()
+    writer.write(max_ping, 32)
+    writer.write_double(server_time)
+    writer.write_double(server_time_scale)
+    writer.write(player_count, 8)
+    writer.write_bool(input_fixed_size is not None)
+    if input_fixed_size is not None:
+        writer.write(input_fixed_size, 10)
+    for tick, players in ticks:
+        writer.round_to_byte()
+        writer.write(tick & 0xFFFFFFFF, 32)
+        writer.write_bool(True)
+        writer.write(sum(1 << i for i, p in enumerate(players) if p is not None), player_count)
+        for player in players:
+            if player is None:
+                continue
+            data, flags = player
+            writer.write_bool(False)   # not absent
+            if input_fixed_size is not None:
+                if len(data) != input_fixed_size:
+                    raise ValueError(f'input of {len(data)} bytes, fixed size is {input_fixed_size}')
+                writer.write_bool(len(data) != 0)
+                for b in data:
+                    writer.write(b, 8)
+            else:
+                writer.write_byte_array(data)
+            writer.write_byte_array(None)   # rpc
+            writer.write(flags & 0xF, 4)
+    return writer.to_bytes()
+
+
+def decode_server_inputs(data: bytes) -> dict:
+    """Reads encode_server_inputs output the way DeterministicTickInputDecoder.Decode does."""
+    reader = BitReader(data)
+    header = {'MaxPing': reader.read(32), 'ServerTime': reader.read_double(), 'ServerTimeScale': reader.read_double(),
+              'PlayerCount': reader.read(8)}
+    fixed = reader.read_bool()
+    header['InputFixedSize'] = reader.read(10) if fixed else None
+    ticks = []
+    while reader.pos + 32 <= len(data) * 8:
+        reader.round_to_byte()
+        tick = {'Tick': reader.read_int(), 'Completed': reader.read_bool(), 'Mask': reader.read(header['PlayerCount']),
+                'Inputs': {}}
+        for player in range(header['PlayerCount']):
+            if not tick['Mask'] >> player & 1:
+                continue
+            if reader.read_bool():
+                tick['Inputs'][player] = {'Absent': True}
+                continue
+            if fixed:
+                payload = reader.read_bytes(header['InputFixedSize']) if reader.read_bool() else None
+            else:
+                payload = reader.read_byte_array()
+            tick['Inputs'][player] = {'Data': payload, 'Rpc': reader.read_byte_array(), 'Flags': reader.read(4)}
+        ticks.append(tick)
+    header['Ticks'] = ticks
+    header['bits'] = reader.pos
+    return header

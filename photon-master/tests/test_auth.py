@@ -434,6 +434,41 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x07'))
 
+    async def simulation_started_game_server(self):
+        reader, writer = await self.probed_game_server()
+        writer.write(frame(2, raise_event(100, CLIENT_CONFIG_REPLY)))
+        await read_frame(reader)   # SimulationStart
+        return reader, writer
+
+    async def test_client_input_relayed_as_verified_input(self):
+        reader, writer = await self.simulation_started_game_server()
+        writer.write(frame(2, raise_event(102, bytes.fromhex('001e0000000900000000000400'))))
+        code, params = decode_event(await read_frame(reader))
+        writer.close()
+        self.assertEqual((code, list(params)), (102, [245]))
+        decoded = quantum.decode_server_inputs(params[245])
+        self.assertEqual([(t['Tick'], t['Inputs']) for t in decoded['Ticks']],
+                         [(30, {0: {'Data': bytes(4), 'Rpc': None, 'Flags': 1}})])
+        self.assertEqual(len(params[245]), 33)
+
+    async def test_each_tick_relayed_once(self):
+        reader, writer = await self.simulation_started_game_server()
+        writer.write(frame(2, raise_event(102, bytes.fromhex('001e0000000900000000000400')))
+                     + frame(2, raise_event(102, bytes.fromhex('001e00000009000000000004007c0000002400000000001000')))
+                     + b'\xf0\x00\x00\x00\x08')
+        ticks = [quantum.decode_server_inputs(decode_event(await read_frame(reader))[1][245])['Ticks'][0]['Tick']
+                 for _ in range(2)]
+        pong = await reader.readexactly(9)   # tick 30 repeated in the second event: not relayed again
+        writer.close()
+        self.assertEqual((ticks, pong[0], pong[5:]), ([30, 31], 0xF0, b'\x00\x00\x00\x08'))
+
+    async def test_input_before_simulation_start_not_relayed(self):
+        reader, writer = await self.probed_game_server()
+        writer.write(frame(2, raise_event(102, bytes.fromhex('001e0000000900000000000400'))) + b'\xf0\x00\x00\x00\x09')
+        pong = await reader.readexactly(9)
+        writer.close()
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x09'))
+
     def test_parse_auth_get_parameters(self):
         self.assertEqual(server.parse_auth_get_parameters(f'username={PLAYFAB_ID}&token={TOKEN}'), (PLAYFAB_ID, TOKEN))
         self.assertEqual(server.parse_auth_get_parameters(''), (None, None))

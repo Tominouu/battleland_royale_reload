@@ -180,5 +180,63 @@ class SimulationStartTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.start).hexdigest(),
                          'bdc664a12376eb65ed99adba866c65648a0d3837f750f729728e3518dfc91da1')
 
+# First two input events of the real client (build/simstart-test/logs/simstart.pcap)
+CLIENT_INPUT_TICK_30 = bytes.fromhex('001e0000000900000000000400')
+CLIENT_INPUT_TICKS_30_31 = bytes.fromhex('001e00000009000000000004007c0000002400000000001000')
+# Hand-derived server input event for tick 30, player 0, data 00000000, flags 1:
+#   bytes 0-3 MaxPing 0 | 4-11 ServerTime 0.0 | 12-19 ServerTimeScale 1.0 | 20 PlayerCount 1 |
+#   21 fixed size enabled (bit 0) + InputFixedSize 4 (bits 1-10) | 22 rest of size + alignment |
+#   23-26 Tick 30 | 27 Completed 1, mask 1, Absent 0, data present 1 | data bits 220-251 | rpc bit 252 |
+#   flags bits 253-256 (1 -> byte 31 bit 5)
+SERVER_INPUT_TICK_30 = bytes.fromhex('00000000 0000000000000000 000000000000f03f 01 09 00 1e000000 0b 000000 20 00'
+                                     .replace(' ', ''))
+
+
+class ClientInputTests(unittest.TestCase):
+    def test_single_record(self):
+        self.assertEqual(quantum.decode_client_inputs(CLIENT_INPUT_TICK_30),
+                         [{'PlayerIndex': 0, 'Tick': 30, 'Data': bytes(4), 'Rpc': None, 'Flags': 1}])
+
+    def test_redundant_previous_tick_first(self):
+        self.assertEqual([(i['Tick'], i['Data'], i['Flags']) for i in quantum.decode_client_inputs(CLIENT_INPUT_TICKS_30_31)],
+                         [(30, bytes(4), 1), (31, bytes(4), 1)])
+
+
+class ServerInputTests(unittest.TestCase):
+    def test_tick_30_bytes(self):
+        self.assertEqual(quantum.encode_server_inputs([(30, [(bytes(4), 1)])], 1, 4), SERVER_INPUT_TICK_30)
+
+    def test_header(self):
+        decoded = quantum.decode_server_inputs(SERVER_INPUT_TICK_30)
+        self.assertEqual({k: decoded[k] for k in ('MaxPing', 'ServerTime', 'ServerTimeScale', 'PlayerCount',
+                                                  'InputFixedSize')},
+                         {'MaxPing': 0, 'ServerTime': 0.0, 'ServerTimeScale': 1.0, 'PlayerCount': 1, 'InputFixedSize': 4})
+
+    def test_block(self):
+        tick, = quantum.decode_server_inputs(SERVER_INPUT_TICK_30)['Ticks']
+        self.assertEqual(tick, {'Tick': 30, 'Completed': True, 'Mask': 1,
+                                'Inputs': {0: {'Data': bytes(4), 'Rpc': None, 'Flags': 1}}})
+
+    def test_length(self):
+        # header 32 + 64 + 64 + 8 + 1 + 10 = 179 bits, aligned to 184; block 32 + 1 + 1 + 1 + 1 + 32 + 1 + 4 = 73
+        self.assertEqual((len(SERVER_INPUT_TICK_30), quantum.decode_server_inputs(SERVER_INPUT_TICK_30)['bits']), (33, 257))
+
+    def test_round_trip_values(self):
+        payload = quantum.encode_server_inputs([(54, [(bytes.fromhex('deadbeef'), 0x1F)])], 1, 4)
+        tick, = quantum.decode_server_inputs(payload)['Ticks']
+        self.assertEqual((tick['Tick'], tick['Inputs'][0]), (54, {'Data': bytes.fromhex('deadbeef'), 'Rpc': None, 'Flags': 0xF}))
+
+    def test_several_ticks_are_byte_aligned(self):
+        payload = quantum.encode_server_inputs([(30, [(bytes(4), 1)]), (31, [(b'\x01\x02\x03\x04', 1)])], 1, 4)
+        self.assertEqual(len(payload), 33 + 10)   # second block starts at bit 264 and ends at 337
+        self.assertEqual(payload[33:37], (31).to_bytes(4, 'little'))
+        self.assertEqual([(t['Tick'], t['Inputs'][0]['Data']) for t in quantum.decode_server_inputs(payload)['Ticks']],
+                         [(30, bytes(4)), (31, b'\x01\x02\x03\x04')])
+
+    def test_wrong_fixed_size_rejected(self):
+        with self.assertRaises(ValueError):
+            quantum.encode_server_inputs([(30, [(bytes(3), 1)])], 1, 4)
+
+
 if __name__ == '__main__':
     unittest.main()

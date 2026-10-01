@@ -7,7 +7,7 @@ the connection alive. The Master answers CreateGame (227) with a room name and t
 the GameServer answers CreateGame by entering the client as actor 1 (OperationResponse 227 + Join event 255)
 and otherwise only logs what the client sends. No room manager. Quantum: a config probe answers the first
 Quantum Join, then one SimulationStart follows the client's configurations (see handle_game_raise_event);
-no input (102) handling.
+each client input tick is relayed back once as a verified input (relay_client_inputs).
 
 Wire format (capture build/photon-appid/logs/photon-4530.pcap + TPeer.SerializeOperationToMessage):
   framed:  FB | len:u32 BE (whole frame) | channel:u8 | 01 | F3 | msgType:u8 | body
@@ -413,6 +413,8 @@ class PhotonConnection:
         self.quantum_probe_sent = False
         self.client_session_config: int | None = None   # DeterministicSessionConfig bits (null bit included)
         self.client_session_config_bit_count = 0
+        self.client_session_config_fields: dict | None = None
+        self.relayed_ticks: set[int] = set()
         self.client_runtime_config: bytes | None = None
         self.simulation_start_sent = False
         self.started = time.monotonic()
@@ -591,6 +593,8 @@ class PhotonConnection:
         if code not in (QUANTUM_EVENT_PROTOCOL, 101, QUANTUM_EVENT_INPUT) or not isinstance(data, bytes):
             return
         self.log(logging.INFO, 'QUANTUM', 'C>S event %d byte[%d] hex=%s', code, len(data), data.hex())
+        if code == QUANTUM_EVENT_INPUT and self.simulation_start_sent:
+            self.relay_client_inputs(data)
         if code != QUANTUM_EVENT_PROTOCOL:
             return
         messages = quantum.decode_messages(data)
@@ -618,6 +622,7 @@ class PhotonConnection:
                 start, count = msg['config_bits']
                 self.client_session_config = quantum.read_raw_bits(data, start, count)
                 self.client_session_config_bit_count = count
+                self.client_session_config_fields = msg['Config']
             elif msg.get('type') == quantum.MSG_RUNTIME_CONFIG and not msg['Requested'] and msg['Config'] is not None:
                 self.client_runtime_config = msg['Config']
         if self.simulation_start_sent or self.client_session_config is None or self.client_runtime_config is None:
@@ -636,6 +641,28 @@ class PhotonConnection:
             self.log(logging.INFO, 'QUANTUM', 'S>C   %s', quantum.describe_message(msg))
         self.send(MSG_EVENT, encode_protocol16_event(QUANTUM_EVENT_PROTOCOL, {PARAM_DATA: start}))
         self.simulation_start_sent = True
+
+    def relay_client_inputs(self, data: bytes):
+        """Sends each client input tick back once, unchanged, as a verified input (one tick per event 102).
+        Ticks already relayed (InputRedundancyStagger repeats the previous one) are not sent again."""
+        config = self.client_session_config_fields
+        fixed_size = config['InputFixedSize'] if config['InputFixedSizeEnabled'] else None
+        for record in quantum.decode_client_inputs(data):
+            tick, player, payload = record['Tick'], record['PlayerIndex'], record['Data']
+            self.log(logging.INFO, 'QUANTUM', 'C>S   input tick=%d player=%d data=%s rpc=%s flags=%d', tick, player,
+                     payload.hex() if payload is not None else None, record['Rpc'], record['Flags'])
+            if tick in self.relayed_ticks:
+                continue
+            if player != 0 or payload is None or len(payload) != fixed_size:
+                self.log(logging.WARNING, 'QUANTUM', 'input tick=%d not relayed (player=%d, data=%s)', tick, player,
+                         payload.hex() if payload is not None else None)
+                continue
+            event = quantum.encode_server_inputs([(tick, [(payload, record['Flags'])])], config['PlayerCount'],
+                                                 fixed_size)
+            self.send(MSG_EVENT, encode_protocol16_event(QUANTUM_EVENT_INPUT, {PARAM_DATA: event}))
+            self.relayed_ticks.add(tick)
+            self.log(logging.INFO, 'QUANTUM', 'S>C relay tick=%d event %d byte[%d] hex=%s', tick, QUANTUM_EVENT_INPUT,
+                     len(event), event.hex())
 
     async def handle_authenticate(self, params: dict, encrypted: bool):
         self.log(logging.INFO, 'AUTH', 'OpAuthenticate encrypted=%s, %d parameters', encrypted, len(params))
