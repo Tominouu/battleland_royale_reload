@@ -90,9 +90,19 @@ def _save_match_count(params, playfab_id):
     return None
 
 
+def _ping_nodes_t(params, playfab_id):
+    # PlayFabRunner.MatchEnded (CONTINUE on the end screen): PingNodesParams P1..P19 (position, kills, room, ...).
+    # The client deserializes FunctionResult into PingNodesResponse (an InventoryResponse whose fields are all
+    # optional, plus R1/R2 trophies before/after and R3 box tokens); a null FunctionResult throws. Bootstrap
+    # answer: an empty object, so R1 = R2 = R3 = 0 (Trophies and BoxTokens set to 0) and no inventory change.
+    # No match logic yet.
+    return {}
+
+
 _FUNCTIONS = {
     "initializeDataS5": _initialize_data_s5,
     "nowTicks": _now_ticks_function,
+    "pingNodesT": _ping_nodes_t,
     "saveMatchCount": _save_match_count,
     "saveS5": _save_s5,
 }
