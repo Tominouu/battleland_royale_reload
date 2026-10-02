@@ -1,6 +1,6 @@
 import json
 from flask import jsonify
-from storage.player_data import get_read_only_data, get_inventory, get_catalog
+from storage.player_data import get_read_only_data, get_inventory, get_catalog, get_virtual_currency
 from playfab.auth import _sessions, error
 
 def get_user_read_only_data(request_json, session_ticket):
@@ -36,6 +36,8 @@ def get_user_inventory(request_json, session_ticket):
         return jsonify(error("Not authorized", 401))
 
     inv = get_inventory(playfab_id)
+    # PlayFabRunner.SyncInventory (after PurchaseItem) applies these balances: same persistent wallet
+    inv["VirtualCurrency"] = get_virtual_currency(playfab_id)
 
     return jsonify({
         "code": 200,

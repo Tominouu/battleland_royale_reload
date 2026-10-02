@@ -76,6 +76,40 @@ def set_statistic(playfab_id, name, value):
     with open(os.path.join(_player_path(playfab_id), "statistics.json"), "w") as f:
         json.dump(statistics, f)
 
+# PlayFab virtual currency codes read by PlayFabRunner.SyncVirtualCurrency / SetupPlayerDataFromLogin:
+# GE GemsBalance, BB BattleBucksBalance, BT MatchBoxTokens, DT DogTagsBalance, XP Experience
+VIRTUAL_CURRENCY_CODES = ("GE", "BB", "BT", "DT", "XP")
+
+def _virtual_currency_path():
+    d = os.path.join(DATA_DIR, "players")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "virtual_currency.json")
+
+def _load_virtual_currencies():
+    path = _virtual_currency_path()
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def get_virtual_currency(playfab_id):
+    """Balances of the 5 codes (0 when never set), kept across server restarts in players/virtual_currency.json."""
+    stored = _load_virtual_currencies().get(playfab_id, {})
+    return {code: stored.get(code, 0) for code in VIRTUAL_CURRENCY_CODES}
+
+def set_virtual_currency(playfab_id, values):
+    """Sets some balances (non-negative ints of known codes); the other codes keep their value."""
+    for code, value in values.items():
+        if code not in VIRTUAL_CURRENCY_CODES:
+            raise ValueError(f"unknown virtual currency {code!r}")
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{code} must be a non-negative int, got {value!r}")
+    wallets = _load_virtual_currencies()
+    wallets[playfab_id] = dict(get_virtual_currency(playfab_id), **values)
+    with open(_virtual_currency_path(), "w") as f:
+        json.dump(wallets, f)
+    return wallets[playfab_id]
+
 def get_inventory(playfab_id):
     path = os.path.join(_player_path(playfab_id), "inventory.json")
     if os.path.exists(path):

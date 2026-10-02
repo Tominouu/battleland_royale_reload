@@ -5,7 +5,7 @@ from flask import jsonify
 
 from playfab.photon_tokens import issue_token
 from storage.player_data import (get_account, get_display_name, get_read_only_data, get_statistics,
-                                 link_account, set_display_name)
+                                 get_virtual_currency, link_account, set_display_name)
 
 # In-memory session store
 _sessions = {}
@@ -62,6 +62,9 @@ def _info_payload(params, playfab_id):
             # SetupPlayerDataFromLogin dereferences TitleInfo unchecked; DisplayName -> BattleTag ("" if empty)
             "TitleInfo": {"DisplayName": _display_name(playfab_id)},
         }
+    if params.get("GetUserVirtualCurrency"):
+        # SetupPlayerDataFromLogin sets BB/DT/GE/XP/BT balances from this dictionary (persistent wallet)
+        payload["UserVirtualCurrency"] = get_virtual_currency(playfab_id)
     if params.get("GetPlayerProfile"):
         payload["PlayerProfile"] = {"PlayerId": playfab_id}
     if params.get("GetTitleData"):

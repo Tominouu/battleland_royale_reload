@@ -3,7 +3,8 @@ import time
 from flask import jsonify
 
 from playfab.auth import TROPHIES_STATISTIC, _sessions, error
-from storage.player_data import get_read_only_data, get_statistics, set_statistic, update_read_only_data
+from storage.player_data import (get_read_only_data, get_statistics, get_virtual_currency, set_statistic,
+                                 update_read_only_data)
 
 # .NET DateTime.Ticks at the Unix epoch (100 ns units since 0001-01-01)
 _DOTNET_EPOCH_TICKS = 621355968000000000
@@ -58,7 +59,8 @@ def _initialize_data_s5(params, playfab_id):
             {"ItemId": "ChestLucky", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 50}},
         ]},
         "MatchBoxTokenDataJson": "{}",
-        "VirtualCurrency": {},
+        # SyncVirtualCurrency overwrites the login balances with these: same persistent wallet
+        "VirtualCurrency": get_virtual_currency(playfab_id),
         "NowTicks": _now_ticks(),
     }
 
