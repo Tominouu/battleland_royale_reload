@@ -416,6 +416,9 @@ class PhotonConnection:
         self.client_session_config_bit_count = 0
         self.client_session_config_fields: dict | None = None
         self.relayed_ticks: set[int] = set()
+        # RPCs from SetPlayerData/Command waiting for the next relayed input of their player
+        # (DeterministicNetworkLocal.InsertRpcData: one RPC per player per tick, the last one wins)
+        self.pending_rpcs: dict[int, tuple[bytes, bool]] = {}
         self.client_runtime_config: bytes | None = None
         self.simulation_start_sent = False
         self.started = time.monotonic()
@@ -609,6 +612,11 @@ class PhotonConnection:
         messages = quantum.decode_messages(data)
         for msg in messages:
             self.log(logging.INFO, 'QUANTUM', 'C>S   %s', quantum.describe_message(msg))
+            rpc = quantum.message_rpc(msg)
+            if rpc is not None:
+                self.pending_rpcs[msg['Index']] = rpc
+                self.log(logging.INFO, 'QUANTUM', 'RPC pending player=%d command=%s rpc=%s', msg['Index'], rpc[1],
+                         rpc[0].hex())
         if self.quantum_probe_sent:
             self.collect_client_configs(data, messages)
             return
@@ -666,8 +674,17 @@ class PhotonConnection:
                 self.log(logging.WARNING, 'QUANTUM', 'input tick=%d not relayed (player=%d, data=%s)', tick, player,
                          payload.hex() if payload is not None else None)
                 continue
-            event = quantum.encode_server_inputs([(tick, [(payload, record['Flags'])])], config['PlayerCount'],
-                                                 fixed_size)
+            # first newly relayed tick of the player carries its pending RPC (_maxTick + 1 of DeterministicNetworkLocal)
+            flags, rpc = record['Flags'], None
+            if player in self.pending_rpcs:
+                rpc, command = self.pending_rpcs.pop(player)
+                if command:
+                    flags |= quantum.INPUT_FLAG_COMMAND
+                else:
+                    flags &= ~quantum.INPUT_FLAG_COMMAND
+                self.log(logging.INFO, 'QUANTUM', 'RPC relayed tick=%d player=%d flags=%d rpc=%s', tick, player, flags,
+                         rpc.hex())
+            event = quantum.encode_server_inputs([(tick, [(payload, flags, rpc)])], config['PlayerCount'], fixed_size)
             self.send(MSG_EVENT, encode_protocol16_event(QUANTUM_EVENT_INPUT, {PARAM_DATA: event}))
             self.relayed_ticks.add(tick)
             self.log(logging.INFO, 'QUANTUM', 'S>C relay tick=%d event %d byte[%d] hex=%s', tick, QUANTUM_EVENT_INPUT,

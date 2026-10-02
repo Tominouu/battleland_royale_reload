@@ -140,6 +140,25 @@ with open(os.path.join(FIXTURES, 'runtimeconfig-1707.bin'), 'rb') as f:
 SIMULATION_START_SHA256 = 'bdc664a12376eb65ed99adba866c65648a0d3837f750f729728e3518dfc91da1'
 
 
+# Real Quantum messages (build/manual-trophy-test): SetPlayerData{Index 0, Data = PlayFabId as uint64 LE}, Command
+CLIENT_SET_PLAYER_DATA = bytes.fromhex('0b000000001100589ee0437b23513501')
+CLIENT_COMMAND = bytes.fromhex('0e000000000d0004000200000000')
+PLAYER_DATA_RPC = bytes.fromhex('2c4ff0a1bd91a89a01000000')   # Data + int32 1 (DeterministicNetworkLocal.OnSetPlayerData)
+
+
+def client_input(*ticks, data=bytes(4), flags=1):
+    """DeterministicTickInput.SimpleSerialize records of player 0, no RPC, packed bit after bit in one event
+    (as the real client sends them)."""
+    w = quantum.BitWriter()
+    for tick in ticks:
+        w.write(0, 8)
+        w.write(tick, 32)
+        w.write_byte_array(data)
+        w.write_byte_array(None)
+        w.write(flags, 8)
+    return w.to_bytes()
+
+
 def raise_event(code, data):
     return bytes.fromhex('fd 0003 f4 62') + bytes([code]) + b'\xf5\x78' + struct.pack('>i', len(data)) + data \
         + bytes.fromhex('fc 79 0001 69 00000000')
@@ -479,6 +498,68 @@ class AuthenticateTests(unittest.IsolatedAsyncioTestCase):
         pong = await reader.readexactly(9)
         writer.close()
         self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x09'))
+
+    async def relayed_inputs(self, reader, count):
+        """Next `count` S>C event 102, decoded: [(tick, input of player 0)]."""
+        out = []
+        for _ in range(count):
+            code, params = decode_event(await read_frame(reader))
+            self.assertEqual(code, 102)
+            tick, = quantum.decode_server_inputs(params[245])['Ticks']
+            out.append((tick['Tick'], tick['Inputs'][0]))
+        return out
+
+    async def test_set_player_data_rpc_on_first_input_tick(self):
+        reader, writer = await self.simulation_started_game_server()
+        writer.write(frame(2, raise_event(100, CLIENT_SET_PLAYER_DATA)) + frame(2, raise_event(102, client_input(30)))
+                     + frame(2, raise_event(102, client_input(31))))
+        relayed = await self.relayed_inputs(reader, 2)
+        writer.close()
+        self.assertEqual(relayed, [(30, {'Data': bytes(4), 'Rpc': PLAYER_DATA_RPC, 'Flags': 1}),
+                                   (31, {'Data': bytes(4), 'Rpc': None, 'Flags': 1})])
+
+    async def test_command_rpc_on_next_tick_with_command_flag(self):
+        reader, writer = await self.simulation_started_game_server()
+        writer.write(frame(2, raise_event(102, client_input(1628))))
+        await self.relayed_inputs(reader, 1)
+        writer.write(frame(2, raise_event(100, CLIENT_COMMAND)) + frame(2, raise_event(102, client_input(1629))))
+        relayed = await self.relayed_inputs(reader, 1)
+        writer.close()
+        self.assertEqual(relayed, [(1629, {'Data': bytes(4), 'Rpc': bytes.fromhex('020001000000'), 'Flags': 9})])
+
+    async def test_last_rpc_before_a_tick_wins(self):
+        reader, writer = await self.simulation_started_game_server()
+        writer.write(frame(2, raise_event(100, CLIENT_SET_PLAYER_DATA)) + frame(2, raise_event(100, CLIENT_COMMAND))
+                     + frame(2, raise_event(102, client_input(30))) + frame(2, raise_event(102, client_input(31))))
+        relayed = await self.relayed_inputs(reader, 2)
+        writer.close()
+        self.assertEqual([(t, i['Rpc'], i['Flags']) for t, i in relayed],
+                         [(30, bytes.fromhex('020001000000'), 9), (31, None, 1)])
+
+    async def test_redundant_tick_does_not_consume_rpc(self):
+        reader, writer = await self.simulation_started_game_server()
+        writer.write(frame(2, raise_event(102, client_input(30))))
+        await self.relayed_inputs(reader, 1)
+        # InputRedundancyStagger: the next event repeats tick 30 before tick 31
+        writer.write(frame(2, raise_event(100, CLIENT_SET_PLAYER_DATA))
+                     + frame(2, raise_event(102, client_input(30, 31))) + b'\xf0\x00\x00\x00\x0b')
+        relayed = await self.relayed_inputs(reader, 1)
+        pong = await reader.readexactly(9)   # tick 30 not relayed again
+        writer.close()
+        self.assertEqual(relayed, [(31, {'Data': bytes(4), 'Rpc': PLAYER_DATA_RPC, 'Flags': 1})])
+        self.assertEqual((pong[0], pong[5:]), (0xF0, b'\x00\x00\x00\x0b'))
+
+    async def test_input_without_rpc_unchanged(self):
+        reader, writer = await self.simulation_started_game_server()
+        writer.write(frame(2, raise_event(102, client_input(30, data=bytes.fromhex('69480000')))))
+        code, params = decode_event(await read_frame(reader))
+        writer.close()
+        self.assertEqual(params[245], quantum.encode_server_inputs([(30, [(bytes.fromhex('69480000'), 1)])], 1, 4))
+
+    def test_client_input_helper_matches_real_records(self):
+        self.assertEqual(client_input(30), bytes.fromhex('001e0000000900000000000400'))
+        self.assertEqual([(r['Tick'], r['Data']) for r in quantum.decode_client_inputs(client_input(30, 31))],
+                         [(30, bytes(4)), (31, bytes(4))])
 
     def test_parse_auth_get_parameters(self):
         self.assertEqual(server.parse_auth_get_parameters(f'username={PLAYFAB_ID}&token={TOKEN}'), (PLAYFAB_ID, TOKEN))

@@ -238,5 +238,52 @@ class ServerInputTests(unittest.TestCase):
             quantum.encode_server_inputs([(30, [(bytes(3), 1)])], 1, 4)
 
 
+# Real client messages (build/manual-trophy-test/logs/photon-master.log): SetPlayerData right after SimulationStart,
+# before the first input (tick 30); Command while playing. Data of SetPlayerData = PlayFabId 9AA891BDA1F04F2C as
+# uint64 little-endian.
+CLIENT_SET_PLAYER_DATA = bytes.fromhex('0b000000001100589ee0437b23513501')
+CLIENT_COMMAND = bytes.fromhex('0e000000000d0004000200000000')
+
+
+class PlayerDataRpcTests(unittest.TestCase):
+    def test_decode_set_player_data(self):
+        msg, padding = quantum.decode_messages(CLIENT_SET_PLAYER_DATA)
+        self.assertEqual((msg['name'], msg['Index'], msg['Data'], padding['padding_bits']),
+                         ('SetPlayerData', 0, bytes.fromhex('2c4ff0a1bd91a89a'), 7))
+        self.assertEqual(int.from_bytes(msg['Data'], 'little'), 0x9AA891BDA1F04F2C)
+
+    def test_decode_command(self):
+        msg, padding = quantum.decode_messages(CLIENT_COMMAND)
+        self.assertEqual((msg['name'], msg['Index'], msg['Data'], padding['padding_bits']),
+                         ('Command', 0, bytes.fromhex('020001000000'), 7))
+
+    def test_set_player_data_rpc_appends_int32_1(self):
+        msg, _ = quantum.decode_messages(CLIENT_SET_PLAYER_DATA)
+        self.assertEqual(quantum.message_rpc(msg), (bytes.fromhex('2c4ff0a1bd91a89a01000000'), False))
+
+    def test_command_rpc_is_raw_data(self):
+        msg, _ = quantum.decode_messages(CLIENT_COMMAND)
+        self.assertEqual(quantum.message_rpc(msg), (bytes.fromhex('020001000000'), True))
+
+    def test_other_messages_have_no_rpc(self):
+        self.assertIsNone(quantum.message_rpc(quantum.decode_messages(CLIENT_JOIN)[0]))
+
+    def test_rpc_reaches_the_client_decoder(self):
+        # SetPlayerData received -> RPC -> encode_server_inputs -> what DeterministicTickInputDecoder reads
+        rpc, command = quantum.message_rpc(quantum.decode_messages(CLIENT_SET_PLAYER_DATA)[0])
+        flags = quantum.INPUT_FLAG_REPEATABLE | (quantum.INPUT_FLAG_COMMAND if command else 0)
+        tick, = quantum.decode_server_inputs(quantum.encode_server_inputs([(30, [(bytes(4), flags, rpc)])], 1, 4))['Ticks']
+        self.assertEqual(tick['Inputs'][0], {'Data': bytes(4), 'Rpc': bytes.fromhex('2c4ff0a1bd91a89a01000000'), 'Flags': 1})
+
+    def test_command_rpc_sets_command_flag(self):
+        rpc, command = quantum.message_rpc(quantum.decode_messages(CLIENT_COMMAND)[0])
+        flags = quantum.INPUT_FLAG_REPEATABLE | (quantum.INPUT_FLAG_COMMAND if command else 0)
+        tick, = quantum.decode_server_inputs(quantum.encode_server_inputs([(1612, [(bytes(4), flags, rpc)])], 1, 4))['Ticks']
+        self.assertEqual(tick['Inputs'][0], {'Data': bytes(4), 'Rpc': bytes.fromhex('020001000000'), 'Flags': 9})
+
+    def test_two_element_players_still_encode_without_rpc(self):
+        self.assertEqual(quantum.encode_server_inputs([(30, [(bytes(4), 1, None)])], 1, 4), SERVER_INPUT_TICK_30)
+
+
 if __name__ == '__main__':
     unittest.main()

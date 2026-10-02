@@ -23,6 +23,8 @@ MSG_JOINED = 2
 MSG_SESSION_CONFIG = 3
 MSG_RUNTIME_CONFIG = 4
 MSG_SIMULATION_START = 5
+MSG_SET_PLAYER_DATA = 11
+MSG_COMMAND = 14
 MSG_NAMES = {1: 'Join', 2: 'Joined', 3: 'SessionConfig', 4: 'RuntimeConfig', 5: 'SimulationStart',
              6: 'SimulationStop', 7: 'ClockCorrect', 8: 'TickChecksum', 9: 'TickChecksumError', 10: 'RttUpdate',
              11: 'SetPlayerData', 12: 'Disconnect', 13: 'FrameSnapshot', 14: 'Command',
@@ -222,6 +224,9 @@ def decode_messages(data: bytes) -> list[dict]:
                 config_bit = reader.pos
                 msg['SessionConfig'] = reader.read_session_config()
                 msg['config_bits'] = (config_bit, reader.pos - config_bit)
+            elif msg_type in (MSG_SET_PLAYER_DATA, MSG_COMMAND):
+                # Protocol.SetPlayerData.Serialize (0x24CFBAC) / Command.Serialize (0x24CE5A8): Index (int), Data (byte[])
+                msg.update(Index=reader.read_int(), Data=reader.read_byte_array())
             else:
                 msg['undecoded'] = True
                 messages.append(msg)
@@ -247,7 +252,21 @@ def describe_message(msg: dict) -> str:
 # The two directions use different serializers.
 
 INPUT_FLAG_REPEATABLE = 1   # DeterministicInputFlags
+INPUT_FLAG_COMMAND = 8
 INPUT_RECORD_MIN_BITS = 8 + 32 + 1 + 1 + 8
+
+
+def message_rpc(msg: dict) -> tuple[bytes, bool] | None:
+    """Tick input RPC for a client SetPlayerData/Command, as DeterministicNetworkLocal builds it:
+    OnSetPlayerData (0x17D4F90) inserts Data + BitConverter.GetBytes(1) (int32 LE) without the Command flag,
+    OnCommand (0x17D4DE4) inserts Data unchanged with the Command flag. Returns (rpc, command) or None.
+    Quantum.Frame.UpdatePlayerData (0xECD15C) turns a non-command RPC into RuntimePlayer data and raises
+    OnPlayerDataSet, which PlayerTakeOverActorSystem needs to hand the actor to the human player."""
+    if msg.get('type') == MSG_SET_PLAYER_DATA and msg.get('Data') is not None:
+        return msg['Data'] + struct.pack('<i', 1), False
+    if msg.get('type') == MSG_COMMAND and msg.get('Data') is not None:
+        return msg['Data'], True
+    return None
 
 
 def decode_client_inputs(data: bytes) -> list[dict]:
@@ -274,7 +293,8 @@ def encode_server_inputs(ticks: list[tuple[int, list[tuple[bytes, int] | None]]]
     bit + exactly InputFixedSize bytes (fixed size, 0x17CDFA0) or presence bit + ushort length + bytes; Rpc
     (presence bit, ushort length, bytes); Flags (4 bits).
 
-    ticks: [(tick, [per player (data, flags) or None when not in the mask])], all ticks marked Completed.
+    ticks: [(tick, [per player (data, flags) or (data, flags, rpc) or None when not in the mask])], all ticks
+    marked Completed; rpc defaults to None.
     The decoder reads blocks while position + 32 <= length, so trailing padding stays below 32 bits."""
     writer = BitWriter()
     writer.write(max_ping, 32)
@@ -292,7 +312,7 @@ def encode_server_inputs(ticks: list[tuple[int, list[tuple[bytes, int] | None]]]
         for player in players:
             if player is None:
                 continue
-            data, flags = player
+            data, flags, rpc = player if len(player) == 3 else (*player, None)
             writer.write_bool(False)   # not absent
             if input_fixed_size is not None:
                 if len(data) != input_fixed_size:
@@ -302,7 +322,7 @@ def encode_server_inputs(ticks: list[tuple[int, list[tuple[bytes, int] | None]]]
                     writer.write(b, 8)
             else:
                 writer.write_byte_array(data)
-            writer.write_byte_array(None)   # rpc
+            writer.write_byte_array(rpc)
             writer.write(flags & 0xF, 4)
     return writer.to_bytes()
 
