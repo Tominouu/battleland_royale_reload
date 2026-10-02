@@ -4,8 +4,8 @@ import time
 from flask import jsonify
 
 from playfab.photon_tokens import issue_token
-from storage.player_data import (get_account, get_display_name, get_read_only_data, link_account,
-                                 set_display_name)
+from storage.player_data import (get_account, get_display_name, get_read_only_data, get_statistics,
+                                 link_account, set_display_name)
 
 # In-memory session store
 _sessions = {}
@@ -20,6 +20,10 @@ def _display_name(playfab_id):
     if playfab_id not in _display_names:
         _display_names[playfab_id] = get_display_name(playfab_id)
     return _display_names[playfab_id]
+
+# PlayerData.STATISTIC_TROPHIES ("Trophies_Season" + 14): PlayFabRunner.InitPlayerData sets PlayerData.Trophies
+# from this PlayerStatistics entry (0 if absent); pingNodesT updates it after each match
+TROPHIES_STATISTIC = "Trophies_Season14"
 
 # PlayFab limits for UpdateUserTitleDisplayNameRequest.DisplayName
 DISPLAY_NAME_MIN_LENGTH = 3
@@ -104,7 +108,10 @@ def _info_payload(params, playfab_id):
         payload["UserReadOnlyData"]["SeasonStatsHistory"] = {"Value": "{}"}
     if params.get("GetPlayerStatistics"):
         # PlayFabRunner.CheckAndUpdateSeason: Season == 14 skips ExecuteCloudScript("startSeason14")
-        payload["PlayerStatistics"] = [{"StatisticName": "Season", "Value": 14}]
+        payload["PlayerStatistics"] = [
+            {"StatisticName": "Season", "Value": 14},
+            {"StatisticName": TROPHIES_STATISTIC, "Value": get_statistics(playfab_id).get(TROPHIES_STATISTIC, 0)},
+        ]
     return payload
 
 def _login(account_key, request_json):

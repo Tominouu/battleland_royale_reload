@@ -62,6 +62,20 @@ def set_display_name(playfab_id, display_name):
     with open(os.path.join(_player_path(playfab_id), "profile.json"), "w") as f:
         json.dump({"DisplayName": display_name}, f)
 
+def get_statistics(playfab_id):
+    """PlayFab player statistics (name -> int value), kept across server restarts."""
+    path = os.path.join(_player_path(playfab_id), "statistics.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def set_statistic(playfab_id, name, value):
+    statistics = get_statistics(playfab_id)
+    statistics[name] = value
+    with open(os.path.join(_player_path(playfab_id), "statistics.json"), "w") as f:
+        json.dump(statistics, f)
+
 def get_inventory(playfab_id):
     path = os.path.join(_player_path(playfab_id), "inventory.json")
     if os.path.exists(path):

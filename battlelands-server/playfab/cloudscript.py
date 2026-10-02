@@ -2,8 +2,8 @@ import time
 
 from flask import jsonify
 
-from playfab.auth import _sessions, error
-from storage.player_data import get_read_only_data, update_read_only_data
+from playfab.auth import TROPHIES_STATISTIC, _sessions, error
+from storage.player_data import get_read_only_data, get_statistics, set_statistic, update_read_only_data
 
 # .NET DateTime.Ticks at the Unix epoch (100 ns units since 0001-01-01)
 _DOTNET_EPOCH_TICKS = 621355968000000000
@@ -90,13 +90,22 @@ def _save_match_count(params, playfab_id):
     return None
 
 
+# Trophies won per final position (design rule, not the historical one); other positions win nothing
+TROPHIES_BY_POSITION = {1: 10, 2: 8, 3: 6, 4: 4, 5: 2}
+
+
 def _ping_nodes_t(params, playfab_id):
-    # PlayFabRunner.MatchEnded (CONTINUE on the end screen): PingNodesParams P1..P19 (position, kills, room, ...).
-    # The client deserializes FunctionResult into PingNodesResponse (an InventoryResponse whose fields are all
-    # optional, plus R1/R2 trophies before/after and R3 box tokens); a null FunctionResult throws. Bootstrap
-    # answer: an empty object, so R1 = R2 = R3 = 0 (Trophies and BoxTokens set to 0) and no inventory change.
-    # No match logic yet.
-    return {}
+    # PlayFabRunner.MatchEnded (CONTINUE on the end screen): PingNodesParams P1..P19 (P1 = final position, P2 = kills,
+    # P3 = room, ...). The client deserializes FunctionResult into PingNodesResponse (an InventoryResponse whose
+    # fields are all optional, plus R1/R2 trophies before/after and R3 box tokens); a null FunctionResult throws.
+    # <MatchEnded>b__2 sets PlayerData.Trophies = R2 and shows R1 -> R2; the client never computes trophies itself.
+    # Only trophies are handled: no inventory or currency change, R3 (box tokens) = 0.
+    position = params.get("P1")
+    gain = TROPHIES_BY_POSITION.get(position, 0) if type(position) is int else 0
+    before = get_statistics(playfab_id).get(TROPHIES_STATISTIC, 0)
+    after = max(0, before + gain)
+    set_statistic(playfab_id, TROPHIES_STATISTIC, after)
+    return {"R1": before, "R2": after, "R3": 0}
 
 
 _FUNCTIONS = {

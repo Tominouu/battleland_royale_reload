@@ -48,12 +48,13 @@ class PingNodesTTests(unittest.TestCase):
         self.assertEqual(body["data"]["FunctionName"], "pingNodesT")
         self.assertNotIn("Error", body["data"])
 
-    def test_function_result_is_empty_object_not_null(self):
+    def test_function_result_is_object_not_null(self):
         # <MatchEnded>b__77_1 dereferences FunctionResult unchecked: null would throw in the client
         _, body = self.ping_nodes_t()
         self.assertIn("FunctionResult", body["data"])
         self.assertIsNotNone(body["data"]["FunctionResult"])
-        self.assertEqual(body["data"]["FunctionResult"], {})
+        # Position 8 (real request): trophies unchanged, only R1/R2/R3 (no inventory or currency fields)
+        self.assertEqual(body["data"]["FunctionResult"], {"R1": 0, "R2": 0, "R3": 0})
 
 
 if __name__ == "__main__":
