@@ -4,7 +4,7 @@ from flask import jsonify
 
 from playfab.auth import TROPHIES_STATISTIC, _sessions, error
 from storage.player_data import (get_read_only_data, get_statistics, get_virtual_currency, set_statistic,
-                                 update_read_only_data)
+                                 set_virtual_currency, update_read_only_data)
 
 # .NET DateTime.Ticks at the Unix epoch (100 ns units since 0001-01-01)
 _DOTNET_EPOCH_TICKS = 621355968000000000
@@ -31,6 +31,29 @@ SESSION_ID_KEY = "SessionId"
 SAVED_SECTIONS = ("Base", "Game", "Extra")
 
 
+# Catalog served by initializeDataS5 (Catalogs["SeasonItems_14"]); purchaseChest reads chest prices from it.
+# SkinRunner.ParseCatalog builds skinDatabase from these; EnsureEquippedSkinsOwned needs the six defaults
+SEASON_ITEMS_14 = [
+    {"ItemId": "MrOfficeGuy", "ItemClass": "Character.Default", "VirtualCurrencyPrices": {}},
+    {"ItemId": "ParachuteDefault", "ItemClass": "Parachute.Default", "VirtualCurrencyPrices": {}},
+    {"ItemId": "AnimDefault", "ItemClass": "Animation.Default", "VirtualCurrencyPrices": {}},
+    {"ItemId": "FlagDefault", "ItemClass": "BattleFlag.Default", "VirtualCurrencyPrices": {}},
+    {"ItemId": "FootstepDefault", "ItemClass": "Footstep.Default", "VirtualCurrencyPrices": {}},
+    {"ItemId": "MeleeDefault", "ItemClass": "Melee.Default", "VirtualCurrencyPrices": {}},
+    # SkinShopRunner.GetNewShopContent needs 5 distinct picks; the Character branch accepts any
+    # non-excluded character, so 5 characters in total let the selection loop terminate
+    {"ItemId": "MrBaldWifeBeater", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+    {"ItemId": "MrBananaMan", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+    {"ItemId": "MrBunny", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+    {"ItemId": "MrGhostPirate", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
+    # SkinGachaRunner.SetupChestCatalogItems finds these by ItemId; Get*ChestPrice reads
+    # VirtualCurrencyPrices["GE"] unchecked. Bootstrap prices (not historical values).
+    {"ItemId": "ChestBattle", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 100}},
+    {"ItemId": "ChestBattlePremium", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 250}},
+    {"ItemId": "ChestLucky", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 50}},
+]
+
+
 def _initialize_data_s5(params, playfab_id):
     if isinstance(params.get("SessionId"), str):
         update_read_only_data(playfab_id, {SESSION_ID_KEY: params["SessionId"]})
@@ -38,26 +61,7 @@ def _initialize_data_s5(params, playfab_id):
     # MatchBoxTokenDataJson must be a JSON object string, VirtualCurrency must be non-null.
     # Catalogs["SeasonItems_14"] is read unchecked by PlayFabRunner.CrosscheckAndResolvePlayerData
     return {
-        # SkinRunner.ParseCatalog builds skinDatabase from these; EnsureEquippedSkinsOwned needs the six defaults
-        "Catalogs": {"SeasonItems_14": [
-            {"ItemId": "MrOfficeGuy", "ItemClass": "Character.Default", "VirtualCurrencyPrices": {}},
-            {"ItemId": "ParachuteDefault", "ItemClass": "Parachute.Default", "VirtualCurrencyPrices": {}},
-            {"ItemId": "AnimDefault", "ItemClass": "Animation.Default", "VirtualCurrencyPrices": {}},
-            {"ItemId": "FlagDefault", "ItemClass": "BattleFlag.Default", "VirtualCurrencyPrices": {}},
-            {"ItemId": "FootstepDefault", "ItemClass": "Footstep.Default", "VirtualCurrencyPrices": {}},
-            {"ItemId": "MeleeDefault", "ItemClass": "Melee.Default", "VirtualCurrencyPrices": {}},
-            # SkinShopRunner.GetNewShopContent needs 5 distinct picks; the Character branch accepts any
-            # non-excluded character, so 5 characters in total let the selection loop terminate
-            {"ItemId": "MrBaldWifeBeater", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
-            {"ItemId": "MrBananaMan", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
-            {"ItemId": "MrBunny", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
-            {"ItemId": "MrGhostPirate", "ItemClass": "Character.Common", "VirtualCurrencyPrices": {}},
-            # SkinGachaRunner.SetupChestCatalogItems finds these by ItemId; Get*ChestPrice reads
-            # VirtualCurrencyPrices["GE"] unchecked. Bootstrap prices (not historical values).
-            {"ItemId": "ChestBattle", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 100}},
-            {"ItemId": "ChestBattlePremium", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 250}},
-            {"ItemId": "ChestLucky", "ItemClass": "Chest", "VirtualCurrencyPrices": {"GE": 50}},
-        ]},
+        "Catalogs": {"SeasonItems_14": SEASON_ITEMS_14},
         "MatchBoxTokenDataJson": "{}",
         # SyncVirtualCurrency overwrites the login balances with these: same persistent wallet
         "VirtualCurrency": get_virtual_currency(playfab_id),
@@ -110,10 +114,41 @@ def _ping_nodes_t(params, playfab_id):
     return {"R1": before, "R2": after, "R3": 0}
 
 
+# Gems credited by each chest: PROVISIONAL test values to exercise the protocol, not the historical drop tables
+# (unknown). RewardType 7 = AddToGems, the only resource UIBoxSequence.GetItemPrefab shows a card for.
+CHEST_GEM_REWARDS = {"ChestBattle": 150, "ChestBattlePremium": 400, "ChestLucky": 75}
+REWARD_TYPE_ADD_TO_GEMS = 7
+
+
+def _purchase_chest(params, playfab_id):
+    # UIBoxShop.Buy{Battle,BattleChestPremium,Lucky}Chest -> PlayFabRunner.PurchaseChest: PurchaseChestParams
+    # {ChestItemId, PriceGems, Discount, SubstituteMaxLevelCards}. The client deserializes a PurchaseChestResponse,
+    # applies it with SyncInventoryFromResponse, then UIBoxSequence.EnterChestOpeningPopup reads ChestRewards
+    # unchecked (must not be null). The price comes from our catalog, never from PriceGems. The 2.9.6 shop always
+    # sends Discount=false (the three click handlers pass a constant), so any other value is rejected rather than
+    # guessed. Debit and credit are written in one wallet update; an error leaves the wallet unchanged.
+    chest_id = params.get("ChestItemId")
+    item = next((i for i in SEASON_ITEMS_14 if i["ItemId"] == chest_id and i["ItemClass"] == "Chest"), None)
+    if item is None or chest_id not in CHEST_GEM_REWARDS:
+        raise CloudScriptError("InvalidItem", f"purchaseChest: unknown chest {chest_id!r}")
+    if params.get("Discount", False) is not False:
+        raise CloudScriptError("InvalidParams", "purchaseChest: discounted chests are not supported")
+    price, reward = item["VirtualCurrencyPrices"]["GE"], CHEST_GEM_REWARDS[chest_id]
+    gems = get_virtual_currency(playfab_id)["GE"]
+    if gems < price:
+        raise CloudScriptError("InsufficientFunds", f"purchaseChest: {price} GE needed, {gems} available")
+    wallet = set_virtual_currency(playfab_id, {"GE": gems - price + reward})
+    return {
+        "VirtualCurrency": wallet,
+        "ChestRewards": [{"Type": REWARD_TYPE_ADD_TO_GEMS, "Amount": reward, "Parameter": ""}],
+    }
+
+
 _FUNCTIONS = {
     "initializeDataS5": _initialize_data_s5,
     "nowTicks": _now_ticks_function,
     "pingNodesT": _ping_nodes_t,
+    "purchaseChest": _purchase_chest,
     "saveMatchCount": _save_match_count,
     "saveS5": _save_s5,
 }
